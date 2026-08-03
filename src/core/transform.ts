@@ -765,6 +765,35 @@ function liftIdentityBlock(kept: SystemField): { identity?: string; kept: System
   return { identity, kept: rest };
 }
 
+/**
+ * Remove a standalone `x-anthropic-billing-header:` block from passed-through
+ * system blocks. Claude Code sends this telemetry line as its own leading block
+ * and deliberately withholds `cache_control` from it — which is exactly why
+ * extractSystemText files it under `kept` instead of routing it through
+ * stripBillingLine, so without this lift it is re-emitted LAST, i.e. buried in
+ * the cached prefix. Since CC 2.1.x the line carries per-turn fields (`cch`,
+ * `cc_prev_req`), so every request then gets a unique prefix and reads zero
+ * cache (measured: two requests differing only in the nonce hashed 02eb31eb vs
+ * c954b86c). The caller re-emits it first, matching the client's own layout.
+ */
+function liftBillingBlock(kept: SystemField): { billing?: string; kept: SystemField } {
+  if (!Array.isArray(kept)) return { kept };
+  let billing: string | undefined;
+  const rest: SystemField = [];
+  for (const block of kept) {
+    if (billing === undefined && block && typeof block === 'object' && block.type === 'text') {
+      const { kept: line, body } = stripBillingLine(block.text.replace(/^\s+/, ''));
+      if (line !== null) {
+        billing = line;
+        if (body.trim().length > 0) rest.push({ ...block, text: body });
+        continue;
+      }
+    }
+    rest.push(block);
+  }
+  return { billing, kept: rest };
+}
+
 function lastStaticSystemCacheControl(sys: SystemField | undefined): TextBlock['cache_control'] | undefined {
   if (!Array.isArray(sys)) return undefined;
   let cacheControl: TextBlock['cache_control'] | undefined;
@@ -1746,7 +1775,12 @@ export async function transformRequest(
   // endpoint classifies on the leading block and answers an opaque
   // `429 rate_limit_error: "Error"` when it does not lead (#149). Lift it out
   // here so the assembly below can put it back in front.
-  const { identity: keptIdentity, kept: sysRemainder } = liftIdentityBlock(rawSysRemainder);
+  const { identity: keptIdentity, kept: sysRemainderNoIdentity } = liftIdentityBlock(rawSysRemainder);
+  // Same problem one block over: the billing header arrives as its own
+  // cache_control-less block, so it also sits in `kept` and would be re-emitted
+  // last — inside the cached prefix. Lift it here; the assembly puts it back in
+  // front, where the client itself puts it.
+  const { billing: keptBilling, kept: sysRemainder } = liftBillingBlock(sysRemainderNoIdentity);
   const { kept: billingLine, body: sysBody } = stripBillingLine(rawSysText);
   // `# Environment` (working dir, git status, model ID) churns per turn but has
   // no XML wrapper, so the static/dynamic split would bake it into the slab PNG
@@ -2026,14 +2060,21 @@ export async function transformRequest(
   // Images go into first user message — system field rejects images (400 system.N.type).
   {
     const sysTail: SystemField = [];
+    // The billing header leads, uncached — the client's own layout. It is NOT
+    // session-stable: since CC 2.1.x it carries per-turn `cch`/`cc_prev_req`,
+    // so anywhere else in `system` it gives every request a unique cached
+    // prefix and zeroes every cache read (the exact failure the older comment
+    // here predicted while believing the line was stable). Unproxied CC sends
+    // this same shape and does get cache hits, so the endpoint evidently lifts
+    // a leading billing block out of the cache key; reproducing the layout is
+    // the least-invasive repair. It also keeps #149 satisfied: identity still
+    // leads every block the endpoint actually classifies on.
+    const billingHeader = keptBilling ?? billingLine;
+    if (billingHeader) sysTail.push({ type: 'text', text: billingHeader });
     if (preservedIdentity) {
       sysTail.push({ type: 'text', text: preservedIdentity });
     }
     // Session-stable, so it sits ahead of the churny blocks below.
-
-    // billingLine is session-stable (warm reads through the anchored prefix
-    // confirm it; a per-turn value here would zero every cache read).
-    if (billingLine) sysTail.push({ type: 'text', text: billingLine });
     if (dynamicText) sysTail.push({ type: 'text', text: dynamicText });
     if (envMarkdown) sysTail.push({ type: 'text', text: envMarkdown });
     if (Array.isArray(sysRemainder)) sysTail.push(...sysRemainder);
