@@ -89,6 +89,11 @@ export interface TransformOptions {
   minToolResultChars?: number;
   /** Soft-wrap width in monospace cells. */
   cols?: number;
+  /** Set internally by `transformRequest`: the caller's explicit `cols`, captured
+   *  before profile defaults are merged in. `cols` itself is seeded from
+   *  `profile.stripCols`, so it can no longer tell a real caller override from a
+   *  profile default — which silently made `historyStripCols` unreachable. */
+  callerCols?: number;
   /** Hard upper bound on images per tool_result; source text truncated with a paging
    *  marker above this to stay under Anthropic's 100-image/request cap. Default 10. */
   maxImagesPerToolResult?: number;
@@ -127,7 +132,15 @@ export interface TransformOptions {
   emitRecoverable?: boolean;
 }
 
-const DEFAULTS: Required<TransformOptions> = {
+/** Options after merging caller opts over profile defaults and `DEFAULTS`.
+ *  Everything is resolved except `callerCols`, which stays absent unless the
+ *  caller genuinely passed `cols` — that absence is what lets history geometry
+ *  fall through to `historyStripCols`. */
+type ResolvedOptions = Required<Omit<TransformOptions, 'callerCols'>> & {
+  callerCols?: number;
+};
+
+const DEFAULTS: Required<Omit<TransformOptions, 'callerCols'>> = {
   compress: true,
   compressTools: true,
   compressToolResults: true,
@@ -307,21 +320,22 @@ function imageTokensCost(
  *  at a lower density than the slab without touching either default. Both are
  *  undefined in every shipped profile, so this returns the dense geometry
  *  unchanged out of the box. */
-function historyGateGeometry(o?: Required<TransformOptions>): GateGeometry {
+function historyGateGeometry(o?: ResolvedOptions): GateGeometry {
   const dense = denseGateGeometry(o);
   const profile = o?.model ? resolveGptProfile(o.model) : undefined;
   if (profile?.historyStripCols === undefined && profile?.historyStyle === undefined) return dense;
   return {
     ...dense,
-    // An explicit `o.cols` is a caller override and still wins, as it does for
-    // the dense path.
-    cols: o?.cols ?? profile.historyStripCols ?? dense.cols,
+    // An explicit caller `cols` still wins, as it does for the dense path — but
+    // it must be the *caller's*, not the one seeded from `profile.stripCols`,
+    // which is always set and would shadow `historyStripCols` in every request.
+    cols: o?.callerCols ?? profile.historyStripCols ?? dense.cols,
     style: profile.historyStyle ?? dense.style,
   };
 }
 
 /** Gate geometry for dense tool-result, reminder, and history pages. */
-function denseGateGeometry(o?: Required<TransformOptions>): GateGeometry {
+function denseGateGeometry(o?: ResolvedOptions): GateGeometry {
   const profile = o?.model ? resolveGptProfile(o.model) : undefined;
   return {
     cols: o?.cols ?? profile?.stripCols ?? DENSE_CONTENT_COLS,
@@ -1623,7 +1637,7 @@ function applyPins(req: MessagesRequest, info: TransformInfo, pins: Pin[]): void
 async function runHistoryCollapseAndFinalize(
   req: MessagesRequest,
   info: TransformInfo,
-  o: Required<TransformOptions>,
+  o: ResolvedOptions,
   opts: TransformOptions,
   droppedCodepoints: Map<number, number>,
   pins: Pin[],
@@ -1661,7 +1675,7 @@ async function runHistoryCollapseAndFinalize(
       req.messages,
       historyProfitable,
       {
-        cols: o.cols,
+        cols: historyGeometry.cols,
         protectedPrefix,
         reflow: o.reflow,
         style: historyGeometry.style,
@@ -1722,7 +1736,12 @@ export async function transformRequest(
   const definedOpts = Object.fromEntries(
     Object.entries(opts).filter(([, value]) => value !== undefined),
   ) as TransformOptions;
-  const merged: TransformOptions = { ...DEFAULTS, ...profileDefaults, ...definedOpts };
+  const merged: TransformOptions = {
+    ...DEFAULTS,
+    ...profileDefaults,
+    ...definedOpts,
+    callerCols: opts.cols,
+  };
   for (const k of Object.keys(merged) as (keyof TransformOptions)[]) {
     if (merged[k] === undefined) {
       (merged as Record<string, unknown>)[k] =
@@ -1730,7 +1749,7 @@ export async function transformRequest(
         ?? (DEFAULTS as Record<string, unknown>)[k];
     }
   }
-  const o: Required<TransformOptions> = merged as Required<TransformOptions>;
+  const o: ResolvedOptions = merged as ResolvedOptions;
   const info: TransformInfo = {
     compressed: false,
     origChars: 0,
@@ -2352,7 +2371,7 @@ export async function transformRequest(
       req.messages,
       historyProfitable,
       {
-        cols: o.cols,
+        cols: historyGeometry.cols,
         protectedPrefix: slabAnchorIdx >= 0 ? slabAnchorIdx + 1 : 0,
         reflow: o.reflow,
         style: historyGeometry.style,

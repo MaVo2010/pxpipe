@@ -13,7 +13,7 @@
 
 import type { CacheControl, ContentBlock, ImageBlock, Message, TextBlock, ToolUseBlock, ToolResultBlock } from './types.js';
 import type { RenderedImage } from './render.js';
-import { DENSE_CONTENT_CHARS_PER_IMAGE, DENSE_CONTENT_COLS, DENSE_RENDER_STYLE, MAX_HEIGHT_PX, neutralizeSentinel, reflow, renderTextToPngsWithCharLimit, roleSlotSegment, SLOT_MARK_ASSISTANT, SLOT_MARK_USER, type RenderStyle } from './render.js';
+import { DENSE_CONTENT_CHARS_PER_IMAGE, DENSE_RENDER_STYLE, MAX_HEIGHT_PX, neutralizeSentinel, reflow, renderTextToPngsWithCharLimit, roleSlotSegment, SLOT_MARK_ASSISTANT, SLOT_MARK_USER, type RenderStyle } from './render.js';
 import { factSheetText } from './factsheet.js';
 import { bytesToBase64 } from './png.js';
 
@@ -568,6 +568,7 @@ async function userTurnBlocks(
   fromInclusive: number,
   upToExclusive: number,
   onImage: (img: RenderedImage) => void,
+  geom: Pick<HistoryCollapseOptions, 'cols' | 'style' | 'maxHeightPx'>,
 ): Promise<ContentBlock[]> {
   const out: ContentBlock[] = [];
   let pending: string[] = [];
@@ -591,11 +592,15 @@ async function userTurnBlocks(
     // Over the cap: this one prompt becomes its own image, kept separate from the
     // history transcript image so it stays independently readable and attributable.
     flush();
+    // Same geometry as the history transcript pages: a verbatim user prompt is the
+    // single most quote-worthy thing in the image set, so it must not be rendered
+    // denser than the profile the reading model was measured legible at (#28).
     const imgs = await renderTextToPngsWithCharLimit(
       `<user t="${i}">\n${typed}\n</user>`,
-      DENSE_CONTENT_COLS,
+      geom.cols,
       DENSE_CONTENT_CHARS_PER_IMAGE,
-      DENSE_RENDER_STYLE,
+      geom.style,
+      geom.maxHeightPx,
     );
     out.push({
       type: 'text',
@@ -782,7 +787,7 @@ export async function collapseHistory(
     if (!seg.text || seg.text.length === 0) {
       // Transcript empty (e.g. the chunk was nothing but user prompts) — the
       // prompts themselves still belong in the output.
-      blocks.push(...(await userTurnBlocks(messages, userFrom, chunkEnd, countImage)));
+      blocks.push(...(await userTurnBlocks(messages, userFrom, chunkEnd, countImage, o)));
       continue;
     }
     // Reflow the text and its parallel slot string in lockstep so role attribution
@@ -842,7 +847,7 @@ export async function collapseHistory(
     if (chunkEnd === carryOverEnd) carryOverOrdinal = imageCount - 1;
     // This chunk's user prompts, as text, immediately after the image they were
     // pulled out of — attribution stays local and the ordering matches the render.
-    blocks.push(...(await userTurnBlocks(messages, userFrom, chunkEnd, countImage)));
+    blocks.push(...(await userTurnBlocks(messages, userFrom, chunkEnd, countImage, o)));
   }
   if (imageCount === 0) {
     info.reason = 'render_empty';

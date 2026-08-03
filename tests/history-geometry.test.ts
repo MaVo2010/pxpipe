@@ -44,6 +44,24 @@ function bodyWithHistory(model: string): Uint8Array {
   }));
 }
 
+/** Anthropic downscales any image wider than this, undoing the legibility the
+ *  larger font was bought for. Mirrors the limit the renderer targets. */
+const NO_RESIZE_W = 1568;
+
+/** Widths of every PNG the transform emitted, read from the IHDR header. */
+function emittedWidths(r: { body: Uint8Array }): number[] {
+  const parsed = JSON.parse(new TextDecoder().decode(r.body));
+  const widths: number[] = [];
+  for (const m of parsed.messages ?? []) {
+    for (const c of Array.isArray(m.content) ? m.content : []) {
+      if (c.type === 'image' && c.source?.data) {
+        widths.push(Buffer.from(c.source.data, 'base64').readUInt32BE(16));
+      }
+    }
+  }
+  return widths;
+}
+
 describe('per-content-class render geometry', () => {
   it('is absent from every shipped profile, so the default path is unchanged', () => {
     for (const m of ['claude-opus-5', 'claude-fable-5', 'gpt-5.6-sol', 'moonshotai/kimi-k3']) {
@@ -112,5 +130,28 @@ describe('per-content-class render geometry', () => {
       options: { cols: 172 },
     });
     expect(r.applied, r.reason).toBe(true);
+    // The pixels, not a proxy: 999 cols would render ~9000 px wide.
+    const widths = emittedWidths(r);
+    expect(widths.length).toBeGreaterThan(0);
+    expect(Math.max(...widths)).toBeLessThanOrEqual(NO_RESIZE_W);
+  });
+
+  it('renders the override geometry at its own width, not the dense width', async () => {
+    // The defect this pins: the override reached the profile but never reached
+    // the renderer, so pages kept the dense 312-col width at a 14px font and
+    // came out 2816 px — downscaled ~1.8x server-side, i.e. *less* legible than
+    // the 10px dense font it replaced. Width is the only witness to that.
+    process.env[ENV] = JSON.stringify({
+      'claude-opus-5': { historyStripCols: 172, historyStyle: { font: 'jetbrains-mono-14' } },
+    });
+    const r = await transformAnthropicMessages({
+      body: bodyWithHistory('claude-opus-5'),
+      model: 'claude-opus-5',
+    });
+    expect(r.applied, r.reason).toBe(true);
+    const widths = emittedWidths(r);
+    expect(Math.max(...widths)).toBeLessThanOrEqual(NO_RESIZE_W);
+    // 172 cols * 9 px/glyph + 8 px pad. Exact, so a silent geometry change trips it.
+    expect(widths).toContain(1556);
   });
 });
