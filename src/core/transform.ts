@@ -836,6 +836,11 @@ const KNOWN_STATIC_TAGS = [
   'toolUseInstructions',
 ] as const;
 
+/** Reserved churn-observation key for the slab text outside any tag-shaped block.
+ *  Starts with '#', which the tag sniffer's `[a-zA-Z][a-zA-Z0-9_-]*` can never
+ *  produce, so it cannot be shadowed by a real tag. */
+export const UNTAGGED_SLAB_KEY = '#untagged';
+
 function splitStaticDynamic(text: string): {
   staticText: string;
   dynamicText: string;
@@ -875,6 +880,8 @@ function splitStaticDynamic(text: string): {
   const sniffer = /<([a-zA-Z][a-zA-Z0-9_-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1>/g;
   const unknown = new Set<string>();
   const staticTagContents = new Map<string, string>();
+  let residue = '';
+  let residueCursor = 0;
   let s: RegExpExecArray | null;
   while ((s = sniffer.exec(staticBuf)) !== null) {
     const tag = s[1]!;
@@ -882,7 +889,21 @@ function splitStaticDynamic(text: string): {
     if (!known.has(tag) && !knownStatic.has(tag)) unknown.add(tag);
     // Fold repeated tags (e.g. several <example>s) into one fingerprint.
     staticTagContents.set(tag, (staticTagContents.get(tag) ?? '') + s[2]!);
+    residue += staticBuf.slice(residueCursor, s.index);
+    residueCursor = s.index + s[0].length;
   }
+  residue += staticBuf.slice(residueCursor);
+  // Everything in the slab that is NOT inside a tag-shaped block. Observed under
+  // a reserved key so the churn canary covers it too: tag sniffing only ever saw
+  // tagged content, so a per-turn change in plain prose — a counter, a path, a
+  // date the client folds into its instructions — re-rendered the slab PNG and
+  // voided the image cache with nothing to show for it. Measured on 2026-08-02:
+  // a two-character move in the untagged remainder invalidated 101,848 cached
+  // tokens while every tag hash stayed put. The key cannot collide with a real
+  // tag; the sniffer only matches /[a-zA-Z][a-zA-Z0-9_-]*/, which cannot start
+  // with '#'. Registered unconditionally, so the canary also runs for slabs that
+  // carry no tags at all — the case that hid this in the first place.
+  staticTagContents.set(UNTAGGED_SLAB_KEY, residue);
 
   return {
     // Collapse the run of blank lines left behind by removed blocks.
