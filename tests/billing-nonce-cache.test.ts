@@ -15,7 +15,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { transformRequest } from '../src/core/transform.js';
+import { cachePrefixDigest, transformRequest } from '../src/core/transform.js';
 
 const FIXTURE = new URL('./fixtures/claude-code-cli-request.json', import.meta.url);
 
@@ -76,5 +76,56 @@ describe('prompt-cache prefix vs. per-request billing nonce', () => {
     // message stream — must not depend on the nonce.
     expect(JSON.stringify(outB.system.slice(1))).toBe(JSON.stringify(outA.system.slice(1)));
     expect(JSON.stringify(outB.messages)).toBe(JSON.stringify(outA.messages));
+  });
+});
+
+/**
+ * The bust *detector* must agree with the endpoint about what the cache key is.
+ * It did not: `cache_prefix_sha8` hashed the leading billing block, so it roamed
+ * every turn (one repeat in 20) while production measured 74k–92k cache_read
+ * against that same "changing" prefix. A detector that cries bust every turn
+ * carries no signal.
+ */
+describe('cache-prefix digest vs. the block the endpoint ignores', () => {
+  it('is one stable sha8 across billing nonces — via transformRequest', async () => {
+    const a = await transformRequest(bodyWithNonce('aaaaa', 'AAAAAAAAAAAAAAAA'));
+    const b = await transformRequest(bodyWithNonce('bbbbb', 'BBBBBBBBBBBBBBBB'));
+
+    // Non-vacuous: a digest must actually have been computed, over a real prefix.
+    expect(a.info.cachePrefixSha8).toMatch(/^[0-9a-f]{8}$/);
+    expect(a.info.cachePrefixBytes).toBeGreaterThan(1000);
+    // And the nonce must really have differed on the way in.
+    const outA = JSON.parse(new TextDecoder().decode(a.body));
+    const outB = JSON.parse(new TextDecoder().decode(b.body));
+    expect(outA.system[0].text).not.toBe(outB.system[0].text);
+
+    expect(b.info.cachePrefixSha8).toBe(a.info.cachePrefixSha8);
+    expect(b.info.cachePrefixBytes).toBe(a.info.cachePrefixBytes);
+  });
+
+  // Positional, and it matters: only a *leading* billing block is lifted out of
+  // the endpoint's cache key. Buried, it does bust the cache — the digest has to
+  // keep saying so. Unreachable through transformRequest (liftBillingBlock always
+  // re-leads it), hence the direct call.
+  const cached = { type: 'text', text: 'static system prefix', cache_control: { type: 'ephemeral' } };
+  const reqWith = (system: unknown[]) => ({
+    tools: [],
+    system,
+    messages: [{ role: 'user', content: [{ type: 'text', text: '[End of rendered context.]' }] }],
+  });
+  const bill = (cch: string) => ({ type: 'text', text: billingLine(cch, 'AAAAAAAAAAAAAAAA') });
+
+  it('ignores the nonce when the billing block leads', async () => {
+    const a = await cachePrefixDigest(reqWith([bill('aaaaa'), cached]));
+    const b = await cachePrefixDigest(reqWith([bill('bbbbb'), cached]));
+    expect(a?.sha8).toBeDefined();
+    expect(b?.sha8).toBe(a?.sha8);
+  });
+
+  it('still reports a bust when the billing block is buried', async () => {
+    const a = await cachePrefixDigest(reqWith([cached, bill('aaaaa')]));
+    const b = await cachePrefixDigest(reqWith([cached, bill('bbbbb')]));
+    expect(a?.sha8).toBeDefined();
+    expect(b?.sha8).not.toBe(a?.sha8);
   });
 });
