@@ -15,6 +15,16 @@ behavioral changes, patch = fixes).
   No rung was fully clean; Grok stays opt-in. Gate and vision math still use
   the measured 1000 tok/MPix rate on the new 764×≤512 geometry.
 
+### Fixed
+- Prompt-cache reads were zero on every compressed request. Claude Code ≥2.1.x
+  sends `x-anthropic-billing-header:` as its own leading system block with no
+  `cache_control`, so it bypassed `stripBillingLine` and was re-emitted at the
+  end of `system` — inside the cached prefix — while that line now carries
+  per-turn fields. Every request thus presented a unique prefix and could never
+  hit. It is now lifted to the front and left uncached, matching the layout the
+  client itself sends. Measured live: 0 of 30 requests warm before, cache reads
+  of 68769 / 69817 / 70630 after.
+
 ## 0.10.0 — 2026-07-22
 
 ### Added

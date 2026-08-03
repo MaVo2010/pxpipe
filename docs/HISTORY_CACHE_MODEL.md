@@ -149,7 +149,7 @@ image"). So the breakpoint lands exactly at the stable↔volatile seam:
 [ intro / static slab image(s) ]            ← stable
 [ last static image ] ← cache_control          ◄── the mark (relocated, not added)
 ─────────────── cache breakpoint ───────────────
-[ end-marker + dynamic <env> + billing line ]  ← per-turn, changes every turn
+[ end-marker + dynamic <env> ]                 ← per-turn, changes every turn
 [ history image, current user content ]        ← after the mark
 ```
 
@@ -157,14 +157,44 @@ Two conditions make the burn one-time, and the layout arranges both:
 
 1. **Everything up to the mark is byte-identical across turns** — guaranteed by
    the quantized boundary (§3).
-2. **Everything volatile sits after the mark** — the billing line, dynamic
-   `<env>`, and current user message are spliced *after* the breakpoint, so they
-   never pollute the prefix cache key.
+2. **Everything volatile sits after the mark** — the dynamic `<env>` and the
+   current user message are spliced *after* the breakpoint, so they never
+   pollute the prefix cache key. The billing line is the one thing that
+   *cannot* be placed there, and that exception is not benign — see §3a.
 
 When both hold, the prefix up to the mark reads warm every turn, and the prefix
 re-keys **only** when the bytes at/before the mark genuinely change — i.e. the
 initial text→image flip and each chunk crossing. That's the one-time create;
 everything in between is a warm read.
+
+### 3a. The billing header is volatile *and* cannot sit after the mark
+
+The `system` field is not "after the mark". A prefix is keyed from the very
+start of the request — `tools`, then `system`, then `messages` — so a
+`cache_control` marker riding the last static *image* (a `messages` block) puts
+the **entire** `system` field inside the cached prefix, no matter where in it a
+block sits. Anything volatile that reaches `system` re-keys the prefix on every
+single turn. The diagram above draws the billing line after the breakpoint;
+that was never structurally true, and believing it is what hid the following
+bug.
+
+Measured 2026-08-03. Claude Code ≥2.1.x sends `x-anthropic-billing-header:` as
+its own *leading system block* which deliberately carries no `cache_control`,
+and the line now holds per-turn fields (`cch`, `cc_prev_req`).
+`stripBillingLine` only ever saw the **inline** form, so the block form was
+filed under `kept` and re-emitted at the end of `system` — inside the prefix.
+Two requests differing in nothing but that nonce hashed `02eb31eb` vs
+`c954b86c`, and 30 of 30 compressed requests read `cache_read=0`.
+
+`liftBillingBlock` re-emits the block **first and uncached**, reproducing the
+layout the unproxied client itself sends. That layout demonstrably does get
+cache hits, so the endpoint evidently keeps a *leading* billing block out of
+the cache key. Be clear about what kind of claim that is: an observed endpoint
+behaviour, not a documented guarantee. If it ever changes, the symptom is
+unmistakable and silent everywhere else — `cache_read` collapses to 0 on every
+compressed request while compression, rendering and latency all look healthy.
+After the fix: 68769, 69817, 70630, rising with the prefix instead of
+collapsing.
 
 ### Why the slab is protected
 

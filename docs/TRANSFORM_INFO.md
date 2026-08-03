@@ -77,9 +77,15 @@ messages[firstUserIdx].content = [
 
 The `system` field carries:
 
-- the `x-anthropic-billing-header:` line that Claude Code injects (stripped
-  off the static text by `stripBillingLine` because it rotates per-turn — see
-  `src/core/transform.ts:315`)
+- the `x-anthropic-billing-header:` line that Claude Code injects, re-emitted
+  **first and uncached**, matching the client's own layout. It rotates per-turn,
+  so it must be kept out of the cached prefix, and it arrives in two shapes:
+  inline in the static text (handled by `stripBillingLine`, see
+  `src/core/transform.ts:315`) and — since CC ≥2.1.x — as its own leading block
+  carrying no `cache_control` of its own (handled by `liftBillingBlock`).
+  Without the second path the block falls through to `kept` and is re-emitted
+  *last*, i.e. inside the prefix, which zeroes every cache read. See
+  `docs/HISTORY_CACHE_MODEL.md` §3a
 - the dynamic tail (`<env>...</env>`, `<git_status>...</git_status>`, etc.)
 - any non-text blocks that lived in the original `system` field
 

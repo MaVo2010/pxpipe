@@ -48,7 +48,8 @@ The transformed request shape is:
 
 ```text
 system:
-  billing line / dynamic context / other text-only system content
+  billing line          ← first and uncached, see below
+  dynamic context / other text-only system content
 
 messages[0] user:
   image block
@@ -59,6 +60,8 @@ messages[0] user:
 ```
 
 Images must be placed in a user message because Anthropic does not accept images in the `system` field.
+
+Order inside `system` is not cosmetic. A prefix is keyed from the start of the request, so the *entire* `system` field sits before the relocated marker: any per-turn bytes anywhere in it re-key the prefix on every turn. The billing line is per-turn since Claude Code 2.1.x, which is why it leads and stays uncached. Getting this wrong is silent — compression, rendering and latency all stay healthy while `cache_read` sits at 0. See `docs/HISTORY_CACHE_MODEL.md` §3a.
 
 ---
 
