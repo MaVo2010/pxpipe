@@ -92,6 +92,11 @@ function applyConfigFileDefaults(): void {
     const models = normalizeModelsConfig(cfg.models);
     if (models !== undefined) process.env.PXPIPE_MODELS = models;
   }
+  // OPS3 (b): `compressToolResults: false` keeps tool results as text. Same
+  // precedence as every other key — an explicit env still wins over the file.
+  if (process.env.PXPIPE_COMPRESS_TOOL_RESULTS === undefined && typeof cfg.compressToolResults === 'boolean') {
+    process.env.PXPIPE_COMPRESS_TOOL_RESULTS = cfg.compressToolResults ? '1' : '0';
+  }
 }
 
 /** Dashboard persistence hook: write the runtime model scope back to the
@@ -1158,6 +1163,11 @@ async function main(): Promise<void> {
       // still logging real usage + count_tokens baselines to its own PXPIPE_LOG.
       // (The dashboard kill switch does the same thing at runtime.)
       if (forcePassthrough || !dashboard.getCompressionEnabled()) return { compress: false };
+      // OPS3 (b), measured 2026-08-15: exact values are unreliable through the
+      // tool-result image path, and the factsheet that mitigates it saturates at
+      // MAX_TOKENS above `minToolResultChars` — i.e. exactly where imaging starts.
+      // History/slab compression is unaffected. See docs/tasks/OPS3-umschalt-journal.md.
+      if (process.env.PXPIPE_COMPRESS_TOOL_RESULTS === '0') return { compressToolResults: false };
       // Active path: use DEFAULTS in transform.ts for break-even gating.
       return {};
     },
