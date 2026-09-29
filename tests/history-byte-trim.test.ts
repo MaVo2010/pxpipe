@@ -348,3 +348,213 @@ describe('a history inside the budget is left alone', () => {
     expect(imagesOf(roomy.messages[0])).toEqual(imagesOf(free.messages[0]));
   });
 });
+
+/** PNG bytes the render cache holds. Straight after clearRenderCache() that is
+ *  every page the call had rendered, admitted or thrown away — which makes it the
+ *  work done, in the same unit as the budget. */
+const rendered = (): number => renderCacheStats().bytes;
+
+/** A session already repacked coarse: the whole range is one chunk. */
+const COARSE = { ...BASE, minFreezeStep: 1280 } as const;
+
+describe('the work follows the budget, not the session', () => {
+  // Measured on the first build of the partial collapse (side port, 2026-09-29): a
+  // coarse session four times over the budget rendered the whole range, then each
+  // half of it on the way down — 160 MiB of pages to admit 17, 24 s per request,
+  // and more than the render cache holds, so every request paid it again.
+  it('does not render a coarse chunk it cannot admit', async () => {
+    const msgs = plainConvo(624);
+
+    clearRenderCache();
+    const full = await collapseHistory(msgs, always, COARSE);
+    expect(full.info.freezeStep).toBeGreaterThanOrEqual(600);
+    // The premise: a render does show up in this counter, at its weight.
+    expect(rendered()).toBeGreaterThanOrEqual(full.info.collapsedImageBytes);
+    const chunk = full.info.collapsedImageBytes / (full.info.collapsedTurns / 10);
+
+    for (const share of [1 / 4, 1 / 8]) {
+      const byteBudget = Math.floor(full.info.collapsedImageBytes * share);
+      clearRenderCache();
+      const { info } = await collapseHistory(msgs, always, { ...COARSE, byteBudget });
+
+      expect(info.byteTrimmed).toBe(true);
+      expect(info.collapsedImageBytes).toBeLessThanOrEqual(byteBudget);
+      // Sparing renders is not an excuse to leave room unused.
+      expect(info.collapsedImageBytes).toBeGreaterThan(byteBudget * 0.85);
+      // What may still be rendered in vain is a chunk that could not be told from
+      // one that fits: at most the slack times the room left. Its first half then
+      // fits, so the next such chunk is a quarter of it, and so on — 1.5 × 4/3,
+      // twice the budget in all. Add what is admitted, and the probe: a page's
+      // worth in base chunks, two of them here.
+      expect(rendered()).toBeLessThan(3 * byteBudget + 2 * chunk);
+    }
+  }, 60_000);
+
+  it('costs a coarse history inside the budget no more than a probe', async () => {
+    const msgs = plainConvo(624);
+    clearRenderCache();
+    const full = await collapseHistory(msgs, always, COARSE);
+    const whole = rendered();
+
+    clearRenderCache();
+    const roomy = await collapseHistory(msgs, always, {
+      ...COARSE,
+      byteBudget: full.info.collapsedImageBytes,
+    });
+
+    expect(roomy.info.byteTrimmed).toBeUndefined();
+    expect(imagesOf(roomy.messages[0])).toEqual(imagesOf(full.messages[0]));
+    expect(rendered()).toBeLessThan(whole * 1.15);
+  }, 60_000);
+
+  it('renders nothing on a fine grid beyond the chunk that did not fit', async () => {
+    const msgs = plainConvo(624);
+    const full = await collapseHistory(msgs, always, BASE);
+    const chunk = full.info.collapsedImageBytes / (full.info.collapsedTurns / 10);
+    const byteBudget = Math.floor(full.info.collapsedImageBytes / 4);
+
+    clearRenderCache();
+    const { info } = await collapseHistory(msgs, always, { ...BASE, byteBudget });
+
+    expect(info.byteTrimmed).toBe(true);
+    expect(rendered()).toBeLessThan(info.collapsedImageBytes + 2 * chunk);
+  }, 60_000);
+
+  it('holds the cut still on a coarse grid as the conversation grows', async () => {
+    const msgs = plainConvo(924);
+    const probe = await collapseHistory(msgs.slice(0, 624), always, COARSE);
+    const byteBudget = Math.floor(probe.info.collapsedImageBytes / 4);
+
+    const early = await collapseHistory(msgs.slice(0, 624), always, { ...COARSE, byteBudget });
+    const later = await collapseHistory(msgs, always, { ...COARSE, byteBudget });
+
+    expect(early.info.byteTrimmed).toBe(true);
+    expect(later.info.collapsedTurns).toBe(early.info.collapsedTurns);
+    expect(imagesOf(later.messages[0])).toEqual(imagesOf(early.messages[0]));
+  }, 60_000);
+
+  it('weighs nothing in advance when there is no budget to keep', async () => {
+    const msgs = plainConvo(624);
+    clearRenderCache();
+    const { info } = await collapseHistory(msgs, always, COARSE);
+
+    expect(info.byteTrimmed).toBeUndefined();
+    expect(info.freezeStep).toBeGreaterThanOrEqual(info.collapsedTurns);
+    // One chunk, one render. A probe is a question about a budget.
+    expect(renderCacheStats().misses).toBe(1);
+  }, 60_000);
+
+  it('measures a chunk against the room left, not the room it started with', async () => {
+    const msgs = plainConvo(624);
+    // What the descent admits first: the front half of the cell the range lies in.
+    // (The cutoff snaps to collapseChunk, 50 by default; 320 is not on that grid.)
+    const front = (
+      await collapseHistory(msgs.slice(0, 324), always, { ...COARSE, collapseChunk: 10 })
+    ).info;
+    expect(front.collapsedTurns).toBe(320);
+    const byteBudget = Math.floor(front.collapsedImageBytes * 1.08);
+
+    clearRenderCache();
+    const { info } = await collapseHistory(msgs, always, { ...COARSE, byteBudget });
+
+    expect(info.byteTrimmed).toBe(true);
+    expect(info.collapsedTurns).toBeGreaterThanOrEqual(320);
+    expect(info.collapsedImageBytes).toBeLessThanOrEqual(byteBudget);
+    // With the front admitted, a thirteenth of the budget is left, and what may be
+    // rendered in vain is twice that (see above). Against the whole budget the
+    // next three parts of the descent would all pass for worth a try: seven
+    // eighths of the front again.
+    expect(rendered()).toBeLessThan(byteBudget * 1.4);
+  }, 60_000);
+});
+
+/** A body whose rows repeat: it fills pages the way prose does and weighs a
+ *  fraction of it, so weight per character is not one number for the session. */
+const drone = (i: number, chars: number): string =>
+  `${i} `.padEnd(8, '.') + 'steady '.repeat(Math.ceil(chars / 7)).slice(0, chars);
+
+function convoOf(from: number, messages: number, body: (i: number) => string): Message[] {
+  const out: Message[] = [];
+  for (let i = from; i < from + messages; i++) {
+    out.push(i % 2 === 0 ? usr(`question ${i}`) : asst(`answer ${i}: ` + body(i)));
+  }
+  return out;
+}
+
+describe('an estimate spares renders and admits nothing', () => {
+  const heavy = (i: number): string => prose(i, 1500);
+  const light = (i: number): string => drone(i, 1500);
+  const weightOf = async (msgs: Message[]): Promise<number> =>
+    (await collapseHistory([...msgs, ...plainConvo(4)], always, COARSE)).info.collapsedImageBytes;
+
+  it('weighs a heavy stretch behind a light opening instead of trusting the opening', async () => {
+    const opening = convoOf(0, 100, light);
+    const msgs = [...opening, ...convoOf(100, 324, heavy)];
+    const lightBytes = await weightOf(opening);
+    const allBytes = (await collapseHistory(msgs, always, COARSE)).info.collapsedImageBytes;
+    // The premise: the opening is the light part, by a wide margin per character.
+    expect(lightBytes / 100).toBeLessThan((allBytes - lightBytes) / 320 / 3);
+
+    const byteBudget = Math.floor(lightBytes + (allBytes - lightBytes) / 3);
+    const { messages: out, info } = await collapseHistory(msgs, always, { ...COARSE, byteBudget });
+
+    expect(info.reason).toBeUndefined();
+    expect(info.byteTrimmed).toBe(true);
+    // Judged by the opening, three times as much would seem to fit.
+    expect(info.collapsedImageBytes).toBeLessThanOrEqual(byteBudget);
+    expect(info.collapsedTurns).toBeGreaterThanOrEqual(100);
+    const tail = out.slice(1);
+    expect(tail).toHaveLength(msgs.length - info.collapsedTurns);
+    tail.forEach((m, k) => expect(m).toBe(msgs[info.collapsedTurns + k]));
+  }, 60_000);
+
+  it('finds less, not nothing, when a light stretch follows a heavy opening', async () => {
+    const opening = convoOf(0, 100, heavy);
+    const msgs = [...opening, ...convoOf(100, 324, light)];
+    const heavyBytes = await weightOf(opening);
+    const allBytes = (await collapseHistory(msgs, always, COARSE)).info.collapsedImageBytes;
+    expect((allBytes - heavyBytes) / 320).toBeLessThan(heavyBytes / 100 / 3);
+
+    const byteBudget = Math.floor(heavyBytes * 1.2 + (allBytes - heavyBytes) / 2);
+    const { info } = await collapseHistory(msgs, always, { ...COARSE, byteBudget });
+
+    // Judged by the opening, the light stretch looks too heavy to try. That is
+    // allowed to cost room. It is not allowed to cost the opening.
+    expect(info.reason).toBeUndefined();
+    expect(info.collapsedImageBytes).toBeLessThanOrEqual(byteBudget);
+    expect(info.collapsedTurns).toBeGreaterThanOrEqual(100);
+  }, 60_000);
+
+  it('does not judge the session by its first exchange', async () => {
+    // One base chunk of repeating rows, then prose. The steadiness the estimate
+    // relies on was measured on stretches of a page and more, which is why the
+    // probe reads that much before it is believed. (A merely terse opening is no
+    // case: ten messages of a few words weigh 1.28 times the session's rate.)
+    const msgs = [...convoOf(0, 10, light), ...convoOf(10, 614, heavy)];
+    const first = await collapseHistory(msgs.slice(0, 14), always, {
+      ...COARSE,
+      collapseChunk: 10,
+      minCollapsePrefix: 1,
+    });
+    clearRenderCache();
+    const full = await collapseHistory(msgs, always, COARSE);
+    const whole = renderCacheStats().bytes;
+    // The premise: per character the first exchange is nothing like the session.
+    const perChar = (i: { collapsedImageBytes: number; collapsedChars: number }): number =>
+      i.collapsedImageBytes / i.collapsedChars;
+    expect(first.info.collapsedTurns).toBe(10);
+    expect(perChar(full.info) / perChar(first.info)).toBeGreaterThan(3);
+
+    const byteBudget = Math.floor(full.info.collapsedImageBytes / 4);
+    clearRenderCache();
+    const { info } = await collapseHistory(msgs, always, { ...COARSE, byteBudget });
+
+    expect(info.byteTrimmed).toBe(true);
+    expect(info.collapsedImageBytes).toBeLessThanOrEqual(byteBudget);
+    expect(info.collapsedImageBytes).toBeGreaterThan(byteBudget * 0.85);
+    // An estimate that is off costs a wrong try: measured here, the front half,
+    // twice the budget. Believed after one light chunk it costs the whole range,
+    // four times the budget, which is the render all of this is there to spare.
+    expect(renderCacheStats().bytes).toBeLessThan(whole + info.collapsedImageBytes);
+  }, 60_000);
+});

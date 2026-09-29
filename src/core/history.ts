@@ -121,6 +121,15 @@ export const ANTHROPIC_MAX_IMAGES = 100;
  *  further with the count it has already emitted for this very request. */
 export const ANTHROPIC_HISTORY_IMAGE_BUDGET = 80;
 
+/** How far over the room left a chunk's ESTIMATED weight has to be before it is
+ *  passed over without being rendered. Admission never uses the estimate, so the
+ *  two ways this can be wrong cost different things: too low passes over a chunk
+ *  that would have fit and collapses less than it could; too high renders a chunk
+ *  to learn that it does not fit. Measured on production traffic (2026-09-12 … 29,
+ *  133 stretches of 20k chars or more in 23 sessions), a stretch came in lighter
+ *  than two thirds of its estimate twice. */
+const BYTE_ESTIMATE_SLACK = 1.5;
+
 export const HISTORY_DEFAULTS: HistoryCollapseOptions = {
   keepTail: 4,
   minCollapsePrefix: 10,
@@ -200,6 +209,10 @@ interface RenderedChunk {
   end: number;
   blocks: ContentBlock[];
   images: RenderedImage[];
+  /** The block each image goes out in, same order as `images`. Its `data` stays
+   *  empty until the chunk is admitted: weighing needs the PNG, not its base64,
+   *  and the encoding is the expensive half of a page that is already cached. */
+  imageBlocks: ImageBlock[];
   bytes: number;
   /** Images the transcript itself produced, ahead of any over-cap user prompts.
    *  Undefined when the chunk had no transcript text at all. */
@@ -646,7 +659,9 @@ async function userTurnBlocks(
   messages: Message[],
   fromInclusive: number,
   upToExclusive: number,
-  onImage: (img: RenderedImage) => void,
+  /** Receives each image with the block it goes out in. The block's `data` is
+   *  left empty: the caller encodes once it knows the chunk is sent. */
+  onImage: (img: RenderedImage, block: ImageBlock) => void,
 ): Promise<ContentBlock[]> {
   const out: ContentBlock[] = [];
   let pending: string[] = [];
@@ -704,15 +719,12 @@ async function userTurnBlocks(
       DENSE_RENDER_STYLE,
     );
     for (const img of imgs) {
-      out.push({
+      const block: ImageBlock = {
         type: 'image',
-        source: {
-          type: 'base64',
-          media_type: 'image/png',
-          data: bytesToBase64(img.png),
-        },
-      } as ContentBlock);
-      onImage(img);
+        source: { type: 'base64', media_type: 'image/png', data: '' },
+      };
+      out.push(block);
+      onImage(img, block);
     }
   }
   return out;
@@ -944,8 +956,10 @@ export async function collapseHistory(
   const renderChunk = async (start: number, end: number): Promise<RenderedChunk> => {
     const blocks: ContentBlock[] = [];
     const images: RenderedImage[] = [];
-    const onImage = (img: RenderedImage): void => {
+    const imageBlocks: ImageBlock[] = [];
+    const onImage = (img: RenderedImage, block: ImageBlock): void => {
       images.push(img);
+      imageBlocks.push(block);
     };
     let transcriptImages: number | undefined;
     // messagesToHistorySegments already omits the user's typed words; userTurnBlocks
@@ -992,18 +1006,15 @@ export async function collapseHistory(
       const markerCC = markerByEnd.get(end);
       for (let k = 0; k < imgs.length; k++) {
         const img = imgs[k]!;
+        // `data` is filled in once the chunk is admitted; see RenderedChunk.
         const block: ImageBlock & { cache_control?: CacheControl } = {
           type: 'image',
-          source: {
-            type: 'base64',
-            media_type: 'image/png',
-            data: bytesToBase64(img.png),
-          },
+          source: { type: 'base64', media_type: 'image/png', data: '' },
         };
         // Mark the LAST image of a marked segment — the caller's breakpoint anchor.
         if (markerCC !== undefined && k === imgs.length - 1) block.cache_control = markerCC;
         blocks.push(block);
-        onImage(img);
+        onImage(img, block);
       }
       transcriptImages = images.length;
     }
@@ -1012,7 +1023,7 @@ export async function collapseHistory(
     blocks.push(...(await userTurnBlocks(messages, start, end, onImage)));
     let bytes = 0;
     for (const img of images) bytes += img.png.length;
-    return { start, end, blocks, images, bytes, transcriptImages };
+    return { start, end, blocks, images, imageBlocks, bytes, transcriptImages };
   };
 
   // ---- Byte budget ----------------------------------------------------------
@@ -1041,10 +1052,56 @@ export async function collapseHistory(
     spentImages -= c.images.length;
     return c;
   };
-  let overflow: RenderedChunk | undefined;
+
+  // Admission is measured. What is NOT rendered may be decided by an estimate:
+  // a chunk several times heavier than the room left costs its whole render to
+  // find out what its length already said. On a coarse grid that chunk is the
+  // entire range — the first build of this descent rendered 160 MiB of pages to
+  // admit 17, on every request, because that is more than the render cache holds.
+  //
+  // Weight per character is the estimate, taken from what this request has
+  // rendered so far. It is steady within a session (production, 2026-09-12 … 29:
+  // the next stretch against everything before it sat between 0.95 and 1.18 at
+  // p05/p95), and it is a property of the font, so no constant can stand in for it:
+  // the same traffic measured 49.5 bytes per char on one profile and 8.6 on another.
+  let measuredBytes = 0;
+  let measuredChars = 0;
+  const charsOf = (start: number, end: number): number =>
+    sumLen(start - protectedPrefix, end - protectedPrefix) +
+    sumOf(userImgLen, start - protectedPrefix, end - protectedPrefix);
+  const measure = async (start: number, end: number): Promise<RenderedChunk> => {
+    const c = await renderChunk(start, end);
+    if (c.bytes > 0) {
+      measuredBytes += c.bytes;
+      measuredChars += charsOf(start, end);
+    }
+    return c;
+  };
+  const hopeless = (start: number, end: number): boolean => {
+    if (measuredChars === 0) return false;
+    const estimate = charsOf(start, end) * (measuredBytes / measuredChars);
+    return estimate > BYTE_ESTIMATE_SLACK * (o.byteBudget - spentBytes);
+  };
+  // Nothing is known before the first render, and on a coarse grid the first
+  // render is the one worth sparing. Weigh a page's worth from the front of the
+  // chunk first: base chunks, so the probe is the same pages on every request of
+  // the session and is served from the cache from the second one on.
+  const calibrate = async (start: number, end: number): Promise<void> => {
+    if (!Number.isFinite(o.byteBudget)) return;
+    for (let a = start; measuredChars < pageChars && a + baseStep < end; a += baseStep) {
+      await measure(a, a + baseStep);
+    }
+  };
+
+  let overflow: { start: number; end: number } | undefined;
   let chunkStart = protectedPrefix;
   for (const chunkEnd of sortedEnds) {
-    const c = await renderChunk(chunkStart, chunkEnd);
+    await calibrate(chunkStart, chunkEnd);
+    if (hopeless(chunkStart, chunkEnd)) {
+      overflow = { start: chunkStart, end: chunkEnd };
+      break;
+    }
+    const c = await measure(chunkStart, chunkEnd);
     if (spentBytes + c.bytes > o.byteBudget) {
       overflow = c;
       break;
@@ -1070,7 +1127,11 @@ export async function collapseHistory(
       // grid has at most one point strictly inside it.
       const mid = protectedPrefix + (Math.floor((lo - protectedPrefix) / s) + 1) * s;
       if (mid >= hi) continue;
-      const c = await renderChunk(lo, mid);
+      if (hopeless(lo, mid)) {
+        hi = mid;
+        continue;
+      }
+      const c = await measure(lo, mid);
       if (fits(c)) {
         admit(c);
         lo = mid;
@@ -1092,7 +1153,7 @@ export async function collapseHistory(
         break;
       }
       retract();
-      const part = await renderChunk(last.start, closed);
+      const part = await measure(last.start, closed);
       if (fits(part)) {
         admit(part);
         cut = closed;
@@ -1133,6 +1194,10 @@ export async function collapseHistory(
     // advance (#11).
     if (c.end === carryOverEnd && c.transcriptImages !== undefined) {
       carryOverOrdinal = imageCount + c.transcriptImages - 1;
+    }
+    // Admitted, so it is sent: this is where a page is encoded, and the only place.
+    for (let k = 0; k < c.images.length; k++) {
+      c.imageBlocks[k]!.source.data = bytesToBase64(c.images[k]!.png);
     }
     blocks.push(...c.blocks);
     for (const img of c.images) {
