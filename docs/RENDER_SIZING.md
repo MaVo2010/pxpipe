@@ -41,22 +41,38 @@ the vision encoder without the old 0.555× resample.
 OpenAI-shaped profiles use portrait strips. GPT 5.6 Sol uses 84×9+8, a 764px
 strip up to 1954px; Grok uses 84×9+8, a 764px strip up to 512px.
 
-There are two ceilings, not one. The documented provider limit is a count: 100
+There are three ceilings, not one. The documented provider limit is a count: 100
 images per request, enforced through `imageHeadroom`. The second is weight, and
 it is empirical: past roughly 20MiB of decoded image bytes, production requests
 start failing as 500s, 502s, empty 200s and stalls (#157), and `/compact`
-traverses the same oversized path, so a session cannot compact its way out.
+traverses the same oversized path, so a session cannot compact its way out. The
+third is the serialized request: measured on production traffic, every request
+under 32MiB was accepted and every request from 32.05MiB up came back 413.
 
-`maxImageBytes` bounds that second budget, defaulting to 18MiB, deliberately
+`maxImageBytes` bounds the second budget, defaulting to 18MiB, deliberately
 under the observed cliff rather than at it. The caller's own images are counted
-first and are never removed to make room. Admission is atomic per semantic
-group: the slab, one tool result, and the history collapse are each imaged whole
-or kept as text whole, because a half-imaged group ships pages without the text
+first and are never removed to make room. `maxWireBytes` bounds the third,
+defaulting to 30MiB. Imaging makes a request heavier on the wire, because a page
+costs 4/3 of its PNG in base64 and replaces far fewer bytes of text, so the wire
+ceiling is applied by narrowing the byte headroom every imaging path already
+spends from; `wireBound` marks the requests where it was the tighter of the two.
+
+Admission is atomic for the slab and for a tool result: each is imaged whole or
+kept as text whole, because a half-imaged group ships pages without the text
 they replaced, and a partially imaged slab re-keys the cache prefix whenever the
-budget arithmetic moves. `imageByteSkips` counts groups refused by weight, kept
-separate from `imageBudgetSkips` because fewer pages and smaller pages are
-different fixes; `imageBytesNearLimit` flags a request that finished inside the
-top 10% of the budget.
+budget arithmetic moves. The history collapse is cut instead. It is admitted
+chunk by chunk on measured weight, oldest first, and ends at the last closed
+boundary that fits; the turns behind the cut stay live text, so nothing is
+shipped without its source. The cut lies on the absolute freeze grid and is a
+function of the messages in front of it, so it holds still while the
+conversation grows. `historyByteTrimmed` marks such a request, which still
+reports `historyReason: collapsed`.
+
+`imageByteSkips` counts groups refused by weight, kept separate from
+`imageBudgetSkips` because fewer pages and smaller pages are different fixes.
+For the collapse that now means not even the smallest closed prefix fit.
+`imageBytesNearLimit` flags a request that finished inside the top 10% of the
+budget.
 
 ## Font and Unicode
 

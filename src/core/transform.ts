@@ -105,8 +105,16 @@ export interface TransformOptions {
    *  cap alone lets a long session assemble a request that is legal by count and
    *  fails by weight: production traffic degrades sharply past roughly 20 MiB
    *  with 500s, 502s, empty 200s and stalls (#157). Groups are admitted whole,
-   *  and a group that does not fit keeps its source text. */
+   *  and a group that does not fit keeps its source text. The history collapse
+   *  is the exception: it is cut at a closed boundary to what still fits. */
   maxImageBytes?: number;
+  /** Ceiling on the serialized request. Imaging makes a request heavier on the
+   *  wire, not lighter: a page costs 4/3 of its PNG in base64 and replaces far
+   *  fewer bytes of text. The image budget alone therefore allows 24 MiB of
+   *  base64 on top of whatever the caller sent, and the provider answers 413
+   *  from 32 MiB. Enforced by narrowing the image byte headroom, so every
+   *  imaging path respects it. Default {@link DEFAULT_MAX_WIRE_BYTES}. */
+  maxWireBytes?: number;
   /** Chars-per-token assumption for `isCompressionProfitable()`. Default 4. */
   charsPerToken?: number;
   /** Multi-turn amortization horizon for the history-collapse gate. N≥2 evaluates as
@@ -142,6 +150,18 @@ export interface TransformOptions {
   emitRecoverable?: boolean;
 }
 
+/**
+ * Default ceiling on the serialized request: 30 MiB.
+ *
+ * Measured on this proxy's production traffic, 2026-08-11 to 2026-09-29, by
+ * serialized size: all 1,219 requests between 24 and 32 MiB returned 200
+ * (largest 31.93 MiB), all 24 requests from 32.05 MiB up returned 413. The
+ * margin below 32 covers what the headroom estimate does not count: the JSON
+ * around each image block, the synthetic framing of the collapse, and pins
+ * appended after it.
+ */
+export const DEFAULT_MAX_WIRE_BYTES = 30 * 1024 * 1024;
+
 const DEFAULTS: Required<TransformOptions> = {
   compress: true,
   compressTools: true,
@@ -156,6 +176,7 @@ const DEFAULTS: Required<TransformOptions> = {
   // Deliberately under the ~20 MiB cliff observed in production rather than at
   // it: the measured threshold is empirical and varies by route and provider.
   maxImageBytes: 18 * 1024 * 1024,
+  maxWireBytes: DEFAULT_MAX_WIRE_BYTES,
   charsPerToken: 4,
   historyAmortizationHorizon: 1,
   priorWarmTokens: 0,
@@ -759,6 +780,12 @@ export interface TransformInfo {
   historyPackFill?: boolean;
   /** The image budget could not hold the whole closed prefix; the tail stayed live text. */
   historyBudgetTrimmed?: boolean;
+  /** The byte headroom could not hold the whole closed prefix; the collapse was
+   *  cut at a closed boundary and the turns behind it stayed live text. */
+  historyByteTrimmed?: boolean;
+  /** The wire ceiling, not the image budget, was the tighter byte limit for this
+   *  request. Says which of the two knobs a trim or a skip is answering to. */
+  wireBound?: boolean;
   /** sha8 of the ACTUAL cacheable prefix sent this turn (tools + system +
    *  message blocks through the imaged history/slab boundary; the live tail is
    *  excluded). Read-only measurement. A change turn-over-turn within a session
@@ -1871,6 +1898,27 @@ export function imageByteHeadroom(info: TransformInfo, limit: number): number {
   return Math.max(0, limit - info.imageBytes - (info.nativeImageBytes ?? 0));
 }
 
+/**
+ * The image byte limit that also keeps the serialized request under the wire
+ * ceiling.
+ *
+ * Every imaging path already asks {@link imageByteHeadroom} before it spends, so
+ * the wire ceiling is expressed in that currency instead of being checked a
+ * second time at each site: the bytes the wire can still take, converted from
+ * base64 back to decoded bytes, on top of the caller's own images, which the
+ * inbound size already contains.
+ *
+ * The text that imaging removes is not credited. That errs toward keeping text.
+ */
+export function wireBoundImageBytes(
+  maxWireBytes: number,
+  inboundBytes: number,
+  nativeImageBytes: number,
+): number {
+  const room = Math.max(0, maxWireBytes - inboundBytes);
+  return nativeImageBytes + Math.floor((room * 3) / 4);
+}
+
 /** True when this request finished close enough to the budget that the next turn
  *  of the same session is likely to hit it. */
 function nearByteLimit(info: TransformInfo, limit: number): boolean {
@@ -1999,22 +2047,18 @@ async function runHistoryCollapseAndFinalize(
         imageBudget: tuning.imageBudget,
         packFill: tuning.packFill,
         minFreezeStep: tuning.minFreezeStep,
+        byteBudget: imageByteHeadroom(info, o.maxImageBytes),
       },
     );
     recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
     if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
     if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
     if (tuning.packFill) info.historyPackFill = true;
-    // Atomic admission by weight. The collapse is one semantic group: applying
-    // it means every collapsed message becomes pages, so a group that does not
-    // fit the byte budget is not applied at all and the original text stands.
-    // Rendering it first and discarding it costs CPU, which is the cheap half of
-    // the trade: the alternative is estimating PNG size from character counts and
-    // being wrong on the request that mattered.
-    if (
-      histInfo.collapsedTurns > 0 &&
-      histInfo.collapsedImageBytes > imageByteHeadroom(info, o.maxImageBytes)
-    ) {
+    if (histInfo.byteTrimmed) info.historyByteTrimmed = true;
+    // The collapse admits by weight itself and cuts at a closed boundary, so what
+    // comes back fits. A refusal now means that not even the smallest closed
+    // prefix did, and only that is counted as a skip.
+    if (histInfo.reason === 'image_bytes') {
       bumpPassthrough(info, 'image_budget');
       info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
       info.historyReason = 'image_bytes';
@@ -2128,6 +2172,14 @@ export async function transformRequest(
   // later path (slab, tool_results, history) rewrites content in place.
   info.nativeImages = countNativeImages(req.messages);
   info.nativeImageBytes = countNativeImageBytes(req.messages);
+
+  // Two byte ceilings, one limit. Narrowed once, here, so the slab, the
+  // tool_results and the collapse all spend from the same headroom.
+  const wireLimit = wireBoundImageBytes(o.maxWireBytes, body.length, info.nativeImageBytes);
+  if (wireLimit < o.maxImageBytes) {
+    o.maxImageBytes = wireLimit;
+    info.wireBound = true;
+  }
 
   // 0. User-pinned instructions. Fold the transcript's pin commands, then remove
   //    them from the outbound copy — the client's own transcript is untouched, so
@@ -2587,22 +2639,18 @@ export async function transformRequest(
         imageBudget: tuning.imageBudget,
         packFill: tuning.packFill,
         minFreezeStep: tuning.minFreezeStep,
+        byteBudget: imageByteHeadroom(info, o.maxImageBytes),
       },
     );
     recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
     if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
     if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
     if (tuning.packFill) info.historyPackFill = true;
-    // Atomic admission by weight. The collapse is one semantic group: applying
-    // it means every collapsed message becomes pages, so a group that does not
-    // fit the byte budget is not applied at all and the original text stands.
-    // Rendering it first and discarding it costs CPU, which is the cheap half of
-    // the trade: the alternative is estimating PNG size from character counts and
-    // being wrong on the request that mattered.
-    if (
-      histInfo.collapsedTurns > 0 &&
-      histInfo.collapsedImageBytes > imageByteHeadroom(info, o.maxImageBytes)
-    ) {
+    if (histInfo.byteTrimmed) info.historyByteTrimmed = true;
+    // The collapse admits by weight itself and cuts at a closed boundary, so what
+    // comes back fits. A refusal now means that not even the smallest closed
+    // prefix did, and only that is counted as a skip.
+    if (histInfo.reason === 'image_bytes') {
       bumpPassthrough(info, 'image_budget');
       info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
       info.historyReason = 'image_bytes';

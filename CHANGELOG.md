@@ -6,6 +6,25 @@ behavioral changes, patch = fixes).
 
 ## Unreleased
 
+### Fixed
+- **A history too heavy for the byte budget is collapsed in part instead of not
+  at all.** The collapse was admitted atomically: rendered whole, weighed, and
+  discarded whole when it did not fit `maxImageBytes`, leaving the entire
+  history as text on exactly the long sessions where it costs most. It is now
+  admitted chunk by chunk on measured weight, oldest first, and cut at the last
+  closed boundary that fits. A chunk that does not fit is halved along the
+  freeze grid before it is given up, so a coarse grid no longer turns one
+  oversized chunk into a refusal of everything. The cut is a function of the
+  messages in front of it and does not move as the conversation grows.
+  `history_reason` stays `collapsed` for such a request and
+  `history_byte_trimmed` marks it; `image_bytes` is left for the case where
+  not even the smallest closed prefix fits.
+- **Requests stay under the provider's request-size limit.** Imaging makes a
+  request heavier on the wire, and the image budget alone allowed 24 MiB of
+  base64 on top of the inbound body. New option `maxWireBytes` (default
+  30 MiB) narrows the byte headroom of every imaging path accordingly;
+  `wire_bound` marks the requests where it was the tighter limit.
+
 ## 0.14.0 — 2026-09-28
 
 ### Added

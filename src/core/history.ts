@@ -99,6 +99,16 @@ export interface HistoryCollapseOptions {
    *  re-render re-keys the whole history. Rounded UP to a power-of-two multiple of
    *  `freezeChunk` so chunk boundaries stay a subset of the base grid. Default 0. */
   minFreezeStep: number;
+  /** Decoded PNG bytes this collapse may emit. Chunks are admitted oldest first
+   *  on their MEASURED weight; when one does not fit, the range is cut there and
+   *  everything behind the cut stays live text. The cut is a closed boundary on
+   *  the absolute grid, so it is a function of the messages in front of it and
+   *  does not move as the conversation grows.
+   *
+   *  Unlike {@link imageBudget}, `0` means no room, not no limit: the caller
+   *  passes the headroom it has left, and none left is a real answer.
+   *  Default `Infinity`. */
+  byteBudget: number;
 }
 
 /** Images Anthropic accepts per request. Exceeding it fails the WHOLE request with
@@ -127,6 +137,7 @@ export const HISTORY_DEFAULTS: HistoryCollapseOptions = {
   imageBudget: ANTHROPIC_HISTORY_IMAGE_BUDGET,
   packFill: false,
   minFreezeStep: 0,
+  byteBudget: Infinity,
 };
 
 /** Per-request telemetry surfaced back to TransformInfo. */
@@ -160,7 +171,8 @@ export interface HistoryCollapseInfo {
     | 'no_closed_prefix'
     | 'not_profitable'
     | 'render_empty'
-    | 'over_budget';
+    | 'over_budget'
+    | 'image_bytes';
   /** Freeze step actually used (messages per chunk). Larger than `o.freezeChunk`
    *  when the image budget or fill-repack forced chunks to merge. The caller pins
    *  it per session (`minFreezeStep`) so the coarser grid never falls back — a
@@ -169,10 +181,29 @@ export interface HistoryCollapseInfo {
   /** True when the collapse range had to be shortened to stay inside the image
    *  budget; the dropped tail stays as live text. */
   budgetTrimmed?: boolean;
+  /** True when the collapse range had to be shortened to stay inside the byte
+   *  budget; the turns behind the cut stay as live text. Independent of
+   *  `budgetTrimmed`: the count and the weight are two ceilings, and a long
+   *  session can meet both. */
+  byteTrimmed?: boolean;
   /** Dropped codepoints from the history render, merged into the
    *  transform-wide map by the caller. */
   droppedChars: number;
   droppedCodepoints: Map<number, number>;
+}
+
+/** One rendered chunk, held back until the byte budget has admitted it. Nothing is
+ *  booked into the telemetry while rendering, so a chunk that is rolled back
+ *  leaves no trace there. */
+interface RenderedChunk {
+  start: number;
+  end: number;
+  blocks: ContentBlock[];
+  images: RenderedImage[];
+  bytes: number;
+  /** Images the transcript itself produced, ahead of any over-cap user prompts.
+   *  Undefined when the chunk had no transcript text at all. */
+  transcriptImages?: number;
 }
 
 
@@ -829,7 +860,7 @@ export async function collapseHistory(
   }
 
   // Exclude slab messages (protectedPrefix) from serialization.
-  const text = messagesToHistoryText(messages, collapseLen, protectedPrefix);
+  let text = messagesToHistoryText(messages, collapseLen, protectedPrefix);
   if (!text || text.length === 0) {
     info.reason = 'render_empty';
     return { messages, info };
@@ -838,9 +869,12 @@ export async function collapseHistory(
   // newline-heavy transcript fills full rows instead of one line per row. Same
   // glyph size (cols unchanged) → identical legibility, fewer images, more saved.
   // `text` stays original — it backs `collapsedChars` and the cache byte-stability.
-  const safeText = neutralizeSentinel(text);
-  const renderText = o.reflow ? reflow(safeText) ?? safeText : text;
-  if (!isProfitable(renderText, o.cols)) { // pass string, not length — see ProfitableFn
+  const profitable = (t: string): boolean => {
+    const safeText = neutralizeSentinel(t);
+    const renderText = o.reflow ? reflow(safeText) ?? safeText : t;
+    return isProfitable(renderText, o.cols); // pass string, not length — see ProfitableFn
+  };
+  if (!profitable(text)) {
     info.reason = 'not_profitable';
     info.collapsedChars = text.length; // surface what we DIDN'T compress
     return { messages, info };
@@ -907,6 +941,182 @@ export async function collapseHistory(
   ends.add(collapseLen);
   const sortedEnds = [...ends].filter((e) => e > protectedPrefix && e <= collapseLen).sort((a, b) => a - b);
 
+  const renderChunk = async (start: number, end: number): Promise<RenderedChunk> => {
+    const blocks: ContentBlock[] = [];
+    const images: RenderedImage[] = [];
+    const onImage = (img: RenderedImage): void => {
+      images.push(img);
+    };
+    let transcriptImages: number | undefined;
+    // messagesToHistorySegments already omits the user's typed words; userTurnBlocks
+    // below carries them as text so a prompt is never read back out of pixels.
+    // An empty transcript (the chunk was nothing but user prompts) skips straight
+    // to them: the prompts themselves still belong in the output.
+    const seg = messagesToHistorySegments(messages, end, start);
+    if (seg.text && seg.text.length > 0) {
+      // Reflow the text and its parallel slot string in lockstep so role attribution
+      // stays codepoint-aligned with the rendered text. The two have identical newline
+      // structure (slot bodies are verbatim copies), so minify/reflow mutate them the
+      // same way; reflow() only bails on a ↵ collision, which hits both identically.
+      let chunkRender = seg.text;
+      let chunkSlot = seg.slotText;
+      if (o.reflow) {
+        // Neutralize pre-existing ↵ first (1:1 swap at identical positions in text+slot, so
+        // they stay codepoint-aligned) — otherwise reflow bails and the chunk renders raw,
+        // unpacked. This conversation's transcript literally contains ↵, which would defeat
+        // packing on exactly the long sessions where collapse matters most.
+        const safeText = neutralizeSentinel(seg.text);
+        const safeSlot = neutralizeSentinel(seg.slotText);
+        const rt = reflow(safeText);
+        const rs = reflow(safeSlot);
+        if (rt !== null && rs !== null) {
+          chunkRender = rt;
+          chunkSlot = rs;
+        } else {
+          chunkRender = safeText;
+          chunkSlot = safeSlot;
+        }
+      }
+      // Use the dense readable profile (not full-canvas) to keep code/config legible.
+      // colorByRole tints the structural <role> tags so turn boundaries are scannable
+      // in the history image; it's token-free (vision cost is by pixel dims, not PNG
+      // byte depth) and carries the serialize-time slot string instead of re-parsing.
+      const imgs = await renderTextToPngsWithCharLimit(
+        chunkRender,
+        o.cols,
+        DENSE_CONTENT_CHARS_PER_IMAGE,
+        { ...o.style, colorByRole: true },
+        o.maxHeightPx,
+        chunkSlot,
+      );
+      const markerCC = markerByEnd.get(end);
+      for (let k = 0; k < imgs.length; k++) {
+        const img = imgs[k]!;
+        const block: ImageBlock & { cache_control?: CacheControl } = {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: bytesToBase64(img.png),
+          },
+        };
+        // Mark the LAST image of a marked segment — the caller's breakpoint anchor.
+        if (markerCC !== undefined && k === imgs.length - 1) block.cache_control = markerCC;
+        blocks.push(block);
+        onImage(img);
+      }
+      transcriptImages = images.length;
+    }
+    // This chunk's user prompts, as text, immediately after the image they were
+    // pulled out of — attribution stays local and the ordering matches the render.
+    blocks.push(...(await userTurnBlocks(messages, start, end, onImage)));
+    let bytes = 0;
+    for (const img of images) bytes += img.png.length;
+    return { start, end, blocks, images, bytes, transcriptImages };
+  };
+
+  // ---- Byte budget ----------------------------------------------------------
+  // Admission is by MEASURED weight, oldest chunk first. Estimating PNG size from
+  // character counts would let us cut before rendering, and would be wrong on the
+  // request that mattered; rendering in order and stopping at the first chunk that
+  // does not fit costs at most that one chunk, and far less than the whole range
+  // this used to render before refusing all of it.
+  if (o.byteBudget <= 0) {
+    // No room is known before the first render. A session that sits at the
+    // ceiling asks this on every request, so the answer should cost nothing.
+    info.reason = 'image_bytes';
+    return { messages, info };
+  }
+  const admitted: RenderedChunk[] = [];
+  let spentBytes = 0;
+  let spentImages = 0;
+  const admit = (c: RenderedChunk): void => {
+    admitted.push(c);
+    spentBytes += c.bytes;
+    spentImages += c.images.length;
+  };
+  const retract = (): RenderedChunk => {
+    const c = admitted.pop()!;
+    spentBytes -= c.bytes;
+    spentImages -= c.images.length;
+    return c;
+  };
+  let overflow: RenderedChunk | undefined;
+  let chunkStart = protectedPrefix;
+  for (const chunkEnd of sortedEnds) {
+    const c = await renderChunk(chunkStart, chunkEnd);
+    if (spentBytes + c.bytes > o.byteBudget) {
+      overflow = c;
+      break;
+    }
+    admit(c);
+    chunkStart = chunkEnd;
+  }
+  if (overflow !== undefined) {
+    // Splitting a chunk ends each part on a partly filled page, so weight is not
+    // the only thing the parts can run out of. The count cap is the provider's
+    // and rejects the whole request; it holds here too.
+    const fits = (c: RenderedChunk): boolean =>
+      spentBytes + c.bytes <= o.byteBudget && spentImages + c.images.length <= budget;
+    // Descend into the chunk that did not fit. On a coarse grid that chunk can be
+    // the whole range, and cutting at its start would collapse nothing: 44% of the
+    // refusals measured in production sat at a step of 160 or more. Halving keeps
+    // every new boundary on the absolute base grid, which is what makes each part
+    // a pure function of its own messages and therefore byte-stable.
+    let lo = overflow.start;
+    let hi = overflow.end;
+    for (let s = step / 2; s >= baseStep; s /= 2) {
+      // A chunk lies inside one cell of the grid it was cut on, so the next finer
+      // grid has at most one point strictly inside it.
+      const mid = protectedPrefix + (Math.floor((lo - protectedPrefix) / s) + 1) * s;
+      if (mid >= hi) continue;
+      const c = await renderChunk(lo, mid);
+      if (fits(c)) {
+        admit(c);
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    // The live text must not open with a tool_result whose call went into the
+    // pixels. Consecutive tool rounds count as one round, so the nearest closed
+    // boundary can lie well behind the point where the budget ran out.
+    let cut = lo;
+    for (;;) {
+      const closed = findClosedPrefixBoundary(messages, cut) + 1;
+      if (closed >= cut) break;
+      while (admitted.length > 0 && admitted[admitted.length - 1]!.start >= closed) retract();
+      const last = admitted[admitted.length - 1];
+      if (last === undefined || last.end <= closed) {
+        cut = closed;
+        break;
+      }
+      retract();
+      const part = await renderChunk(last.start, closed);
+      if (fits(part)) {
+        admit(part);
+        cut = closed;
+        break;
+      }
+      // Fewer messages rendered heavier: possible, since a part paginates on its
+      // own. Give the part up and ask again from the start of its chunk.
+      cut = last.start;
+    }
+    if (admitted.length === 0 || cut - protectedPrefix < o.minCollapsePrefix) {
+      info.reason = 'image_bytes';
+      return { messages, info };
+    }
+    collapseLen = cut;
+    text = messagesToHistoryText(messages, collapseLen, protectedPrefix);
+    // The gate cleared the full range. What it is asked to justify has changed.
+    if (!text || text.length === 0 || !profitable(text)) {
+      info.reason = 'not_profitable';
+      info.collapsedChars = text ? text.length : 0;
+      return { messages, info };
+    }
+    info.byteTrimmed = true;
+  }
+
   // Carry-over anchor end: the largest FULLY grid-aligned chunk boundary strictly
   // before collapseLen. That chunk's bytes are frozen across window advances, unlike
   // the newest partial chunk — so it's the stable place to pin the cache breakpoint (#11).
@@ -916,88 +1126,26 @@ export async function collapseHistory(
 
   const blocks: ContentBlock[] = [];
   let imageCount = 0;
-  const countImage = (img: RenderedImage) => {
-    imageCount++;
-    info.collapsedImageBytes += img.png.length;
-    info.collapsedImagePixels += img.width * img.height;
-    info.collapsedPngs.push(img.png);
-    info.collapsedImageDims.push({ width: img.width, height: img.height });
-    info.droppedChars += img.droppedChars;
-    for (const [cp, n] of img.droppedCodepoints) {
-      info.droppedCodepoints.set(cp, (info.droppedCodepoints.get(cp) ?? 0) + n);
+  for (const c of admitted) {
+    // The carry-over chunk's LAST transcript image is the newest byte-stable
+    // history image. Record its ordinal so the relocator pins the cache breakpoint
+    // here instead of on the still-growing newest chunk, which busts every window
+    // advance (#11).
+    if (c.end === carryOverEnd && c.transcriptImages !== undefined) {
+      carryOverOrdinal = imageCount + c.transcriptImages - 1;
     }
-  };
-  let chunkStart = protectedPrefix;
-  for (const chunkEnd of sortedEnds) {
-    // messagesToHistorySegments already omits the user's typed words; userTurnBlocks
-    // below carries them as text so a prompt is never read back out of pixels.
-    const seg = messagesToHistorySegments(messages, chunkEnd, chunkStart);
-    const userFrom = chunkStart;
-    chunkStart = chunkEnd;
-    if (!seg.text || seg.text.length === 0) {
-      // Transcript empty (e.g. the chunk was nothing but user prompts) — the
-      // prompts themselves still belong in the output.
-      blocks.push(...(await userTurnBlocks(messages, userFrom, chunkEnd, countImage)));
-      continue;
-    }
-    // Reflow the text and its parallel slot string in lockstep so role attribution
-    // stays codepoint-aligned with the rendered text. The two have identical newline
-    // structure (slot bodies are verbatim copies), so minify/reflow mutate them the
-    // same way; reflow() only bails on a ↵ collision, which hits both identically.
-    let chunkRender = seg.text;
-    let chunkSlot = seg.slotText;
-    if (o.reflow) {
-      // Neutralize pre-existing ↵ first (1:1 swap at identical positions in text+slot, so
-      // they stay codepoint-aligned) — otherwise reflow bails and the chunk renders raw,
-      // unpacked. This conversation's transcript literally contains ↵, which would defeat
-      // packing on exactly the long sessions where collapse matters most.
-      const safeText = neutralizeSentinel(seg.text);
-      const safeSlot = neutralizeSentinel(seg.slotText);
-      const rt = reflow(safeText);
-      const rs = reflow(safeSlot);
-      if (rt !== null && rs !== null) {
-        chunkRender = rt;
-        chunkSlot = rs;
-      } else {
-        chunkRender = safeText;
-        chunkSlot = safeSlot;
+    blocks.push(...c.blocks);
+    for (const img of c.images) {
+      imageCount++;
+      info.collapsedImageBytes += img.png.length;
+      info.collapsedImagePixels += img.width * img.height;
+      info.collapsedPngs.push(img.png);
+      info.collapsedImageDims.push({ width: img.width, height: img.height });
+      info.droppedChars += img.droppedChars;
+      for (const [cp, n] of img.droppedCodepoints) {
+        info.droppedCodepoints.set(cp, (info.droppedCodepoints.get(cp) ?? 0) + n);
       }
     }
-    // Use the dense readable profile (not full-canvas) to keep code/config legible.
-    // colorByRole tints the structural <role> tags so turn boundaries are scannable
-    // in the history image; it's token-free (vision cost is by pixel dims, not PNG
-    // byte depth) and carries the serialize-time slot string instead of re-parsing.
-    const imgs = await renderTextToPngsWithCharLimit(
-      chunkRender,
-      o.cols,
-      DENSE_CONTENT_CHARS_PER_IMAGE,
-      { ...o.style, colorByRole: true },
-      o.maxHeightPx,
-      chunkSlot,
-    );
-    const markerCC = markerByEnd.get(chunkEnd);
-    for (let k = 0; k < imgs.length; k++) {
-      const img = imgs[k]!;
-      const block: ImageBlock & { cache_control?: CacheControl } = {
-        type: 'image',
-        source: {
-          type: 'base64',
-          media_type: 'image/png',
-          data: bytesToBase64(img.png),
-        },
-      };
-      // Mark the LAST image of a marked segment — the caller's breakpoint anchor.
-      if (markerCC !== undefined && k === imgs.length - 1) block.cache_control = markerCC;
-      blocks.push(block);
-      countImage(img);
-    }
-    // The carry-over chunk's LAST image is the newest byte-stable history image.
-    // Record its ordinal so the relocator pins the cache breakpoint here instead of
-    // on the still-growing newest chunk, which busts every window advance (#11).
-    if (chunkEnd === carryOverEnd) carryOverOrdinal = imageCount - 1;
-    // This chunk's user prompts, as text, immediately after the image they were
-    // pulled out of — attribution stays local and the ordering matches the render.
-    blocks.push(...(await userTurnBlocks(messages, userFrom, chunkEnd, countImage)));
   }
   if (imageCount === 0) {
     info.reason = 'render_empty';

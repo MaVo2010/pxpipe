@@ -89,6 +89,13 @@ export interface TrackEvent {
   /** Set when the grid was coarsened purely to fit the image budget — the turn
    *  paid legibility for a request that would otherwise have been rejected. */
   history_budget_trimmed?: boolean;
+  /** Set when the collapse was cut short to fit the byte headroom. The request
+   *  still reads `history_reason: collapsed`; `image_bytes` is left for the case
+   *  where not even the smallest closed prefix fit. */
+  history_byte_trimmed?: boolean;
+  /** Set when the wire ceiling, not the image budget, was the tighter byte limit
+   *  for this request. */
+  wire_bound?: boolean;
   /** Set when the session's upstream cache was provably dead and the collapse
    *  was therefore allowed to repack for density. Pair with cache_read_tokens:
    *  a repack that lands on a live cache would show as a cache_create spike. */
@@ -304,6 +311,8 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     }
     if (info.historyFreezeStep !== undefined) out.history_freeze_step = info.historyFreezeStep;
     if (info.historyBudgetTrimmed) out.history_budget_trimmed = true;
+    if (info.historyByteTrimmed) out.history_byte_trimmed = true;
+    if (info.wireBound) out.wire_bound = true;
     if (info.historyPackFill) out.history_pack_fill = true;
     if (info.droppedChars !== undefined && info.droppedChars > 0) {
       out.dropped_chars = info.droppedChars;
