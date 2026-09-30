@@ -24,6 +24,8 @@ behavioral changes, patch = fixes).
   base64 on top of the inbound body. New option `maxWireBytes` (default
   30 MiB) narrows the byte headroom of every imaging path accordingly;
   `wire_bound` marks the requests where it was the tighter limit.
+- Field measurements behind both fixes, the causes left open, and how to check
+  them on your own host: [docs/SAVINGS-DROP-AUDIT-2026-09.md](docs/SAVINGS-DROP-AUDIT-2026-09.md).
 
 ## 0.14.0 — 2026-09-28
 
