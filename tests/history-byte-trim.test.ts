@@ -333,6 +333,54 @@ describe('the count cap still holds while trimming by weight', () => {
     expect(info.collapsedImages).toBeLessThanOrEqual(imageBudget);
     expect(info.collapsedImageBytes).toBeLessThanOrEqual(byteBudget);
   });
+
+  it('holds the count on measured pages when the page estimate is wrong', async () => {
+    // The grid is planned on an estimate of characters per page, and that
+    // estimate does not know the font: at jetbrains-mono-14 a page holds half
+    // of what it assumes (measured 2026-10-03: 2.0x, 2.31x with 2 px rows), so
+    // a plan that fits the budget renders twice as many pages. The byte budget
+    // used to stop that first; with lighter pages it no longer does, and a
+    // production-shaped request went out with 113 images. Admission measures
+    // pages it has rendered, so it can count them.
+    const msgs = plainConvo(124);
+    const legible = {
+      cols: 172,
+      style: { font: 'jetbrains-mono-14' as const, cellHBonus: 2, aa: true },
+      // What the transform passes today: the font-blind estimate for 172 cols.
+      pageChars: 172 * 90,
+    };
+    const free = await collapseHistory(msgs, always, { ...legible, imageBudget: 0 });
+    const imageBudget = Math.floor(free.info.collapsedImages / 2);
+    // The premise: by the estimate the whole range fits, so only measurement can catch it.
+    expect(Math.ceil((free.info.collapsedChars * 1.0) / legible.pageChars)).toBeLessThanOrEqual(imageBudget);
+
+    const { messages: out, info } = await collapseHistory(msgs, always, { ...legible, imageBudget });
+
+    expect(info.reason).toBeUndefined();
+    expect(info.collapsedImages).toBeLessThanOrEqual(imageBudget);
+    expect(info.collapsedImages).toBeGreaterThan(imageBudget * 0.7);
+    expect(info.budgetTrimmed).toBe(true);
+    expect(imagesOf(out[0])).toHaveLength(info.collapsedImages);
+    const tail = out.slice(1);
+    tail.forEach((m, k) => expect(m).toBe(msgs[info.collapsedTurns + k]));
+  }, 60_000);
+
+  it('names the count, not the weight, when the count refuses', async () => {
+    // Two pages fit the budget, one 10-turn chunk renders two, and the caller asks
+    // for at least twenty turns: nothing can be admitted, and the reason has to say
+    // which ceiling it was, or the next look at the telemetry chases bytes.
+    const msgs = plainConvo(124);
+    const { messages: out, info } = await collapseHistory(msgs, always, {
+      cols: 172,
+      style: { font: 'jetbrains-mono-14' as const, cellHBonus: 2, aa: true },
+      pageChars: 172 * 90,
+      imageBudget: 2,
+      minCollapsePrefix: 20,
+    });
+    expect(out).toBe(msgs);
+    expect(info.reason).toBe('over_budget');
+    expect(info.collapsedImages).toBe(0);
+  }, 60_000);
 });
 
 describe('a history inside the budget is left alone', () => {
