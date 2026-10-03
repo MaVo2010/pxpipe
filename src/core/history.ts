@@ -1094,6 +1094,8 @@ export async function collapseHistory(
   };
 
   let overflow: { start: number; end: number } | undefined;
+  // Which ceiling stopped admission: weight, or the count the grid was planned to stay under.
+  let overflowBy: 'bytes' | 'count' = 'bytes';
   let chunkStart = protectedPrefix;
   for (const chunkEnd of sortedEnds) {
     await calibrate(chunkStart, chunkEnd);
@@ -1104,6 +1106,15 @@ export async function collapseHistory(
     const c = await measure(chunkStart, chunkEnd);
     if (spentBytes + c.bytes > o.byteBudget) {
       overflow = c;
+      break;
+    }
+    // The grid was sized from an estimate of characters per page that does not know
+    // the font: at jetbrains-mono-14 a page holds half of what it assumes, so a plan
+    // that fits the budget can render twice the pages. The count is a hard provider
+    // limit, and these pages are already rendered, so admission counts them.
+    if (spentImages + c.images.length > budget) {
+      overflow = c;
+      overflowBy = 'count';
       break;
     }
     admit(c);
@@ -1164,7 +1175,9 @@ export async function collapseHistory(
       cut = last.start;
     }
     if (admitted.length === 0 || cut - protectedPrefix < o.minCollapsePrefix) {
-      info.reason = 'image_bytes';
+      // Same reasons as the estimate-based paths: weight refuses as image_bytes,
+      // the count as over_budget, so telemetry keeps naming the ceiling that bit.
+      info.reason = overflowBy === 'count' ? 'over_budget' : 'image_bytes';
       return { messages, info };
     }
     collapseLen = cut;
@@ -1175,7 +1188,8 @@ export async function collapseHistory(
       info.collapsedChars = text ? text.length : 0;
       return { messages, info };
     }
-    info.byteTrimmed = true;
+    if (overflowBy === 'count') info.budgetTrimmed = true;
+    else info.byteTrimmed = true;
   }
 
   // Carry-over anchor end: the largest FULLY grid-aligned chunk boundary strictly
