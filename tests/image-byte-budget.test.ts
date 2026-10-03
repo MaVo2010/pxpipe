@@ -122,8 +122,9 @@ describe('a group that does not fit keeps its text', () => {
   });
 
   it('keeps a tool_result as text when its pages do not fit', async () => {
-    // Measured on this fixture: the slab renders to 12,683 bytes and the
-    // tool_result group to about 6,358 more. A budget between the two admits the
+    // Measured on this fixture: the slab renders to 11,002 bytes and the
+    // tool_result group to about 5,232 more (encoder of 2026-10-03; it was 12,683
+    // and 6,358 before rows got their own filter). A budget between the two admits the
     // slab and leaves the tool group without room, which is the case worth
     // pinning: partial admission is what must not happen.
     const { body: out, info } = await transformRequest(
@@ -182,12 +183,24 @@ describe('telemetry distinguishes the two ceilings', () => {
   });
 
   it('warns before the next turn walks into the wall', async () => {
-    const { info } = await transformRequest(withSlab([{ role: 'user', content: 'go' }]), {
-      // The slab measures 12,683 bytes, so a 14,000-byte budget admits it at
-      // about 91% full: nothing is dropped this turn, and the next one will be.
-      maxImageBytes: 14_000,
-    });
-    expect(info.imageCount ?? 0).toBeGreaterThan(0);
-    expect(info.imageBytesNearLimit).toBe(true);
+    // The budget is set from the slab's own weight, so the case stays at the
+    // fill it is about when the encoder gets better: a byte count written in
+    // here went stale the day page weight changed.
+    const slab = (await transformRequest(withSlab([{ role: 'user', content: 'go' }]))).info.imageBytes;
+    expect(slab).toBeGreaterThan(0);
+    const at = async (fill: number) => {
+      resetSessionState();
+      return (await transformRequest(withSlab([{ role: 'user', content: 'go' }]), {
+        maxImageBytes: Math.ceil(slab / fill),
+      })).info;
+    };
+    // About 91% full: nothing is dropped this turn, and the next one will be.
+    const near = await at(0.91);
+    expect(near.imageCount ?? 0).toBeGreaterThan(0);
+    expect(near.imageBytesNearLimit).toBe(true);
+    // About 85% full: no warning. A flag that is always set warns nobody.
+    const roomy = await at(0.85);
+    expect(roomy.imageCount ?? 0).toBeGreaterThan(0);
+    expect(roomy.imageBytesNearLimit).toBeFalsy();
   });
 });
