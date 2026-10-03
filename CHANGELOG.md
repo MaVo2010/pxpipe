@@ -24,7 +24,20 @@ behavioral changes, patch = fixes).
   base64 on top of the inbound body. New option `maxWireBytes` (default
   30 MiB) narrows the byte headroom of every imaging path accordingly;
   `wire_bound` marks the requests where it was the tighter limit.
-- Field measurements behind both fixes, the causes left open, and how to check
+- **The history collapse counts the pages it renders, not only their weight.**
+  Its grid is planned from a characters-per-page estimate that assumes the
+  5x8 cell; at `jetbrains-mono-14` a page holds half of that, so a plan that
+  fits the image budget could render twice the pages. Admission now checks
+  the count on rendered pages; a cut by count sets `history_budget_trimmed`,
+  a refusal by count reports `over_budget`.
+
+### Changed
+- **PNG rows choose their own scanline filter.** RGB pages pick None, Sub, Up,
+  Average or Paeth per row; grayscale pages are deflated both ways and the
+  smaller is kept. Pixel-identical, deterministic, still Workers-portable.
+  Measured on real history pages: 68–75% of the previous size.
+- Field measurements behind these fixes, a blinded exact-value canary for
+  Opus 5.5 on the 0.14.0 geometries, the causes left open, and how to check
   them on your own host: [docs/SAVINGS-DROP-AUDIT-2026-09.md](docs/SAVINGS-DROP-AUDIT-2026-09.md).
 
 ## 0.14.0 — 2026-09-28

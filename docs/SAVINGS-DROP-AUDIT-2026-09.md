@@ -92,6 +92,69 @@ admitted. What goes upstream is unchanged against the first version on all
 side port against a stub upstream with long sessions and compare
 `transform_ms`.** Tests do not measure time.
 
+## Follow-up, 2026-10-03: what the first days showed, and two more commits
+
+**Reading after four days.** The dashboard counts from service start only.
+On the host above the fixed build ran at 57.0% until an unrelated reboot and
+at 40.8% after it. Of the 16.5-point gap, 9.0 came from traffic mix (fewer
+sessions over 1M tokens after the reboot) and 7.5 from erosion that is built
+into the fix: once a session reaches the byte budget the cut freezes, and
+everything newer stays text. A Fable session went from 82.6% to 61.6% saved
+while it grew from 1.3 to 1.6M tokens; an Opus 5.5 session from 40.7% to 18%.
+Opus 5.5 was 31% of the traffic and saved 9–17%, because its legible pages
+weigh about six times as much per character as Fable's.
+
+**`perf(png)`: lighter pages, same pixels.** Rows now pick their PNG filter
+individually instead of all using Average. On 587 real Opus history pages
+from the host's image ring: 74.9% of the previous size, never heavier,
+pixel-identical after decoding. Fable-geometry pages: 68.3%. More history
+fits under the same byte budget at no token cost, since vision tokens are
+priced by pixel dimensions.
+
+**`fix(history)`: count the pages, not only their weight.** Lighter pages
+exposed a second limit. The collapse plans its grid from an estimate of
+characters per page that assumes the 5x8 cell; at `jetbrains-mono-14` a page
+holds half of that (measured 2.0x, 2.31x with 0.14.0's extra 2 px rows). The
+byte budget used to stop admission before that mattered. With lighter pages a
+side-port run sent 113 and 115 images, past the provider's cap of 100.
+Admission now counts the pages it has rendered as well as their bytes; a cut
+by count sets `history_budget_trimmed`, a refusal by count says
+`over_budget`. **Do not take the PNG commit without this one.** The estimate
+itself is still font-blind; fixing that changes grid steps for live sessions
+and is a separate step.
+
+Side-port result with both commits (same 11-request sequence as above):
+a long Opus session images 570 turns instead of 410, Fable sends the same
+turns in 11.2 instead of 16.6 MiB, at most 83 images, the cached prefix
+stays byte-identical turn to turn, median `transform_ms` unchanged.
+
+**If you run Opus 5.5 on this branch, read this.** 0.14.0 moved every
+non-Fable Claude model to the spaced 5x8 cell at 312 columns, on a gist
+benchmark (93/98). This host measured exact values with its blinded canary
+(26 values per run: commit SHAs, md5s, P&L figures, file:line, file names,
+caps; `UNLESBAR` allowed), fresh Opus 5.5 reader per run:
+
+| geometry for Opus 5.5 history | exact | **silently wrong** | admitted unreadable |
+|---|---|---|---|
+| spaced 5x8 @ 312 (0.14.0 default) | 11/26 | **3/26** | 12/26 |
+| same, pre-registered repeat | 38/100 | **18/100** | 44/100 |
+| `jetbrains-mono-14` @ 172 (override below) | 26/26 | **0/26** | 0/26 |
+
+The errors are single-character substitutions (`7352.05` read as `7352.65`,
+`fits.ts` as `fills.ts`) that look like valid values. If your agent relies on
+exact ids, hashes or numbers from earlier in a session, set the override the
+host above runs with (systemd needs the outer single quotes, or it strips the
+inner ones and the JSON silently fails to parse):
+
+```
+Environment='PXPIPE_GPT_PROFILES={"claude-opus-5":{"historyStripCols":172,"historyStyle":{"font":"jetbrains-mono-14"}}}'
+```
+
+The key `claude-opus-5` matches `claude-opus-5-5` by prefix. Verify in the
+running process, not in the unit file:
+`tr '\0' '\n' < /proc/$(systemctl show pxpipe -p MainPID --value)/environ | grep GPT_PROFILES`.
+It costs savings (heavier pages); that is the trade the numbers above buy.
+
 ## Causes 2 and 3, not touched by this branch
 
 2. **Image budget 80 / cap 100** (`src/core/history.ts`). Before the sync
@@ -103,9 +166,11 @@ side port against a stub upstream with long sessions and compare
    message's hash. 37,415 POST requests shared 30 keys on this host (the
    largest: 2.2 days, three models, 56% overlap). The `freezeStep` floor
    only rises and leaks from long into short conversations; the same key
-   choice distorts the dashboard baseline.
+   choice distorts the dashboard baseline. **Addressed upstream in 0.14.0**
+   (#293, the anchor skips `<system-reminder>` envelopes; #295 persists the
+   floor across restarts), so this branch has it by its base.
 
-Both are separate follow-ups. Do not expect this branch to restore the
+Cause 2 is still open. Do not expect this branch to restore the
 pre-sync figure; the honest expectation is the byte-cliff share back, minus
 whatever your own traffic mix does.
 
@@ -141,7 +206,9 @@ swap it back and restart; no git operation needed.
 
 ## Status of this branch
 
-Rebased onto `v0.14.0` from a fork that was on 0.13.2. Suite 1278/1278,
-`tsc` clean, build clean, change set identical to what runs on the host
-above since 2026-09-29T23:34Z. The live effect on that host had not been
-read at the time of writing (needs 1–2 days of traffic after the restart).
+Rebased onto `v0.14.0` from a fork that was on 0.13.2. Five commits:
+byte trim, its perf fix, this note, the PNG filter, the page count. Change
+set of the history and PNG code identical to what runs on the host above
+since 2026-10-03T19:06Z (there on top of a few unrelated fork commits).
+The effect of the last two commits on live traffic had not been read at the
+time of writing.
