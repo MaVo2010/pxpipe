@@ -49,14 +49,20 @@ about 200 tokens per request).
 `skipped`.
 
 **Compressed requests.** A third `count_tokens` probe runs on the sent body with
-pxpipe's own rendered images removed (the PNGs listed in `info.imagePngs`: slab
-pages and collapsed history pages). Images the client sent (for example
-screenshots) stay in. A message whose content becomes empty gets a single `"."`
-text block (a few tokens of noise, always in the same direction). The cost of the
-removed images is computed with `anthropicVisionTokens`
-(`src/core/anthropic-vision.ts:40`) from `info.imageDims`, which pxpipe knows
-exactly because it rendered them. The probe upload therefore grows only by the text
-part, not by the image megabytes.
+pxpipe's own rendered images removed (slab pages, collapsed history pages, imaged
+tool results). An image block counts as pxpipe's when its base64 data occurs
+nowhere in the original body, so images the client sent (for example screenshots)
+stay in. A block list that becomes empty gets a single `"."` text block (a few
+tokens of noise, always in the same direction). The cost of the removed images is
+computed with `anthropicVisionTokens` (`src/core/anthropic-vision.ts:40`) from the
+width and height in each PNG's header, which is exact because pxpipe rendered
+them. The probe upload therefore grows only by the text part, not by the image
+megabytes.
+
+(Revised 2026-10-08 with the implementation plan: the first version matched
+against `info.imagePngs` / `info.imageDims`. That needs every PNG re-encoded to
+base64, measured at about 210 ms per request for 80 pages on this host. The
+original-body lookup finds the same images without re-encoding.)
 
 The probe uses the same body filter as the existing probes
 (`buildBaselineCountTokensBody`, `src/core/measurement.ts`), the same upstream
@@ -116,9 +122,11 @@ gets a corrected line on raw tokens:
 
 **Tests first** (`npx vitest run` in the worktree):
 
-1. Probe body (`src/core/measurement.ts`): removes exactly the images in
-   `info.imagePngs`, keeps client images, inserts `"."` where content becomes empty.
-   Image cost equals the sum of `anthropicVisionTokens` over `imageDims`.
+1. Probe body (`src/core/sent-probe.ts`): removes exactly the images not in the
+   original body, keeps client images (PNG or not), inserts `"."` where a block
+   list becomes empty. Image cost equals the sum of `anthropicVisionTokens` over
+   the removed images' PNG sizes, and in the proxy test equals the sum over
+   `info.imageDims`.
 2. Proxy against a stub upstream: compressed request -> three probes, the third
    without pxpipe images and correspondingly small, three new fields with `ok`.
    Uncompressed -> two probes, `skipped`. Third probe fails -> `failed`, client
