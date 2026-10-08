@@ -7,7 +7,7 @@ import {
 import { anthropicVisionTokens } from '../src/core/anthropic-vision.js';
 
 /** Base64 of a PNG header (signature + IHDR) for a w×h image. Enough for the
- *  dims parser; `tag` fills the CRC slot so payloads differ. */
+ *  dims parser; `tag` fills bytes 33-36 (after the IHDR CRC) so payloads differ. */
 function pngB64(w: number, h: number, tag = 0): string {
   const b = new Uint8Array(37);
   b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
@@ -98,6 +98,20 @@ describe('buildSentCountTokensBody', () => {
     const r = buildSentCountTokensBody(enc(o), enc(s2))!;
     expect(JSON.stringify(dec(r.body))).toContain(jpeg);
     expect(r.removedImageDims).toEqual([{ width: 1568, height: 728 }]);
+  });
+
+  it('keeps a JPEG that is only in the sent body (not PNG, not from the client); removes the pxpipe PNG', () => {
+    const jpeg = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8U';
+    const o = { ...original, messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }] }] };
+    const s2 = {
+      ...o,
+      messages: [{ role: 'user', content: [img(P2), { type: 'text', text: 'look' }, img(jpeg, 'image/jpeg')] }],
+    };
+    const r = buildSentCountTokensBody(enc(o), enc(s2))!;
+    const out = dec(r.body);
+    expect(JSON.stringify(out)).not.toContain(P2);
+    expect(out.messages[0].content).toEqual([{ type: 'text', text: 'look' }, img(jpeg, 'image/jpeg')]);
+    expect(r.removedImageDims).toEqual([{ width: 1568, height: 23 }]);
   });
 
   it('drops fields count_tokens rejects', () => {

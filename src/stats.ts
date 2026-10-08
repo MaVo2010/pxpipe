@@ -14,7 +14,7 @@
 import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import type { TrackEvent } from './core/tracker.js';
-import { rawThinkingSurcharge } from './core/thinking-floor.js';
+import { isSurchargeMeasured, rawThinkingSurcharge } from './core/thinking-floor.js';
 
 // ---- pure aggregator ------------------------------------------------------
 
@@ -161,7 +161,7 @@ export function fold(s: Summary, ev: TrackEvent): Summary {
       (ev.cache_read_tokens ?? 0);
     s.baselineMeasuredEvents++;
     s.baselineThinkingFloorTotal += baseline + rawThinkingSurcharge(ev);
-    if (ev.compressed === true && ev.sent_probe_status === 'ok') s.thinkingFloorMeasuredEvents++;
+    if (isSurchargeMeasured(ev)) s.thinkingFloorMeasuredEvents++;
   }
 
   if (ev.cwd) {

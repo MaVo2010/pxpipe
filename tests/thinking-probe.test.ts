@@ -68,16 +68,22 @@ async function drive(
   countTokens: (probeBody: string) => Promise<Response> | Response,
   reply: () => Response = jsonReply,
   settleMs = 60,
+  /** Optional: every upstream call in the order it was ISSUED (slot taken
+   *  before the body is read, label filled in once it is). */
+  order?: string[],
 ) {
   const probes: string[] = [];
   const forwarded: string[] = [];
   const restore = mockUpstream(async (req) => {
     const url = new URL(req.url);
     if (url.pathname === '/v1/messages/count_tokens') {
+      const slot = order ? order.push('probe') - 1 : -1;
       const b = await req.text();
+      if (order) order[slot] = isOriginal(b) ? 'probe-original' : 'probe-sent';
       probes.push(b);
       return countTokens(b);
     }
+    order?.push('forward');
     forwarded.push(await req.text());
     return reply();
   });
@@ -110,6 +116,15 @@ describe('third count_tokens probe (sent body without pxpipe images)', () => {
       (a, x) => a + anthropicVisionTokens('claude-fable-5', x.width, x.height), 0);
     expect(info.sentImageTokensEst).toBe(want);
     expect(info.sentImageTokensEst).toBeGreaterThan(0);
+  });
+
+  it('the main forward is issued before the third probe (default duplicate hold)', async () => {
+    const order: string[] = [];
+    const d = await drive(body(), (b) => ok(isOriginal(b) ? 9000 : 3000), jsonReply, 60, order);
+    expect(d.event.info?.compressed).toBe(true);
+    expect(order.indexOf('forward')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('forward')).toBeLessThan(order.indexOf('probe-sent'));
+    expect(order.filter((x) => x === 'probe-sent')).toHaveLength(1);
   });
 
   it('uncompressed request: no third probe, status skipped', async () => {

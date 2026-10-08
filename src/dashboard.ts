@@ -38,7 +38,12 @@ import {
   computeBaselineInputEffWithCacheTier,
   deriveBaselineWarmth,
 } from './core/baseline.js';
-import { floorBaselineSizes, sentProbeSurcharge, type SurchargeRow } from './core/thinking-floor.js';
+import {
+  floorBaselineSizes,
+  isSurchargeMeasured,
+  sentProbeSurcharge,
+  type SurchargeRow,
+} from './core/thinking-floor.js';
 import {
   computeOpenAIActualInputEff,
   computeOpenAIBaselineInputEff,
@@ -826,8 +831,7 @@ export class DashboardState {
           )
         : actualInputEff;
       // Thinking-aware floor: same formula, sizes + S, own S-inclusive prior.
-      const surchargeMeasured = compressed && info?.sentProbeStatus === 'ok';
-      const surcharge = sentProbeSurcharge({
+      const surchargeRow: SurchargeRow = {
         compressed,
         input_tokens: inp,
         cache_create_tokens: cc,
@@ -835,7 +839,9 @@ export class DashboardState {
         sent_count_tokens: info?.sentCountTokens,
         sent_image_tokens_est: info?.sentImageTokensEst,
         sent_probe_status: info?.sentProbeStatus,
-      });
+      };
+      const surchargeMeasured = isSurchargeMeasured(surchargeRow);
+      const surcharge = sentProbeSurcharge(surchargeRow);
       const floorSizes = floorBaselineSizes(baseline ?? 0, cacheable, surcharge);
       // Prior whose S was not measured: assume the current S was cached already
       // (the conservative split; reuse is capped at the current size downstream).
@@ -1233,7 +1239,7 @@ export class DashboardState {
               cc5m,
             )
           : actualInputEff;
-        const surchargeMeasuredR = compressed && t.sent_probe_status === 'ok';
+        const surchargeMeasuredR = isSurchargeMeasured(t as SurchargeRow);
         const floorCacheableR = floorBaselineSizes(
           baseline ?? 0,
           cacheable,
@@ -1475,7 +1481,8 @@ export class DashboardState {
       // Lower bound with the thinking tokens count_tokens skips (src/core/thinking-floor.ts).
       baseline_input_weighted_thinking_min: Math.round(floorBaseline),
       saved_input_tokens_thinking_min: Math.round(floorBaseline - actual),
-      saved_pct_input_only_thinking_min: round1(pctInputThinkingMin),
+      // A lower bound, so round down (toward the safe side), not half-up.
+      saved_pct_input_only_thinking_min: Math.floor(pctInputThinkingMin * 10) / 10,
       thinking_floor_measured_requests: totals.thinkingFloorMeasured,
       thinking_floor_eligible_requests: totals.thinkingFloorEligible,
       saved_pct_of_total_bill: round1(pctTotal),

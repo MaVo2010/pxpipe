@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   floorBaselineSizes,
+  isSurchargeMeasured,
   rawThinkingSurcharge,
   sentProbeSurcharge,
 } from '../src/core/thinking-floor.js';
@@ -30,6 +31,13 @@ describe('surcharge', () => {
   it('raw: uncompressed uses billed minus baseline, compressed uses the probe', () => {
     expect(rawThinkingSurcharge({ compressed: false, baseline_tokens: 1000, input_tokens: 1100 })).toBe(100);
     expect(rawThinkingSurcharge(row)).toBe(1000);
+  });
+  it('measured means compressed, probe ok and both numbers present; unknown compression adds nothing', () => {
+    expect(isSurchargeMeasured({ ...row, sent_count_tokens: 0 })).toBe(false);
+    expect(isSurchargeMeasured({ ...row, sent_image_tokens_est: undefined })).toBe(false);
+    expect(isSurchargeMeasured({ ...row, compressed: undefined })).toBe(false);
+    expect(isSurchargeMeasured(row)).toBe(true);
+    expect(rawThinkingSurcharge({ baseline_tokens: 1000, input_tokens: 1100 })).toBe(0);
   });
   it('adds S to the cacheable part only when there is one', () => {
     expect(floorBaselineSizes(100000, 90000, 1000)).toEqual({ baseline: 101000, cacheable: 91000 });
@@ -71,7 +79,7 @@ describe('dashboard thinking floor', () => {
     expect(s.actual_input_weighted).toBe(39500);
     expect(s.baseline_input_weighted_thinking_min).toBe(123750);
     expect(s.saved_input_tokens_thinking_min).toBe(84250);
-    expect(s.saved_pct_input_only_thinking_min).toBe(68.1);
+    expect(s.saved_pct_input_only_thinking_min).toBe(68);
     expect(s.thinking_floor_measured_requests).toBe(1);
     expect(s.thinking_floor_eligible_requests).toBe(1);
   });

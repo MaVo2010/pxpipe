@@ -6,8 +6,10 @@
  * claude-opus-5-5 / claude-fable-5-1 are billed for them, so baseline_tokens is
  * too low. On compressed rows the third probe measures the gap on the SENT body:
  * S = billed input - (sent_count_tokens + sent_image_tokens_est), floored at 0.
- * Unmeasured rows get S = 0, which keeps the corrected baseline a lower bound
- * (thinking pxpipe collapsed away is not in the sent body and is not recovered).
+ * Unmeasured rows get S = 0. Lower bound while (1) sent thinking <= original
+ * thinking, (2) the collapsed range does not shrink within a session (per row;
+ * the session sum holds anyway), (3) the last cache marker follows the earlier
+ * replies. See docs/CACHING_AND_SAVINGS.md, "Thinking-aware floor".
  */
 export interface SurchargeRow {
   compressed?: boolean;
@@ -25,19 +27,28 @@ export function billedInputTokens(r: SurchargeRow): number {
   return (r.input_tokens ?? 0) + (r.cache_create_tokens ?? 0) + (r.cache_read_tokens ?? 0);
 }
 
+/** True when this row's surcharge was measured: compressed, third probe ok,
+ *  and both numbers present. The only definition; dashboard and stats use it. */
+export function isSurchargeMeasured(r: SurchargeRow): boolean {
+  return r.compressed === true
+    && r.sent_probe_status === 'ok'
+    && typeof r.sent_count_tokens === 'number' && r.sent_count_tokens > 0
+    && typeof r.sent_image_tokens_est === 'number' && r.sent_image_tokens_est >= 0;
+}
+
 /** Compressed rows: billed tokens the sent-body probe could not account for. */
 export function sentProbeSurcharge(r: SurchargeRow): number {
-  if (r.compressed !== true || r.sent_probe_status !== 'ok') return 0;
-  if (typeof r.sent_count_tokens !== 'number' || !(r.sent_count_tokens > 0)) return 0;
-  const counted = r.sent_count_tokens + Math.max(0, r.sent_image_tokens_est ?? 0);
+  if (!isSurchargeMeasured(r)) return 0;
+  const counted = r.sent_count_tokens! + r.sent_image_tokens_est!;
   return Math.max(0, billedInputTokens(r) - counted);
 }
 
-/** Long-run stats (raw tokens): uncompressed rows forward the original, so
- *  billed - baseline_tokens IS the gap (exact, floored at 0). Compressed rows
- *  use the sent-body probe. */
+/** Long-run stats (raw tokens): uncompressed rows forward the original body
+ *  unless a pin rewrote it, so billed - baseline_tokens IS the gap (exact,
+ *  floored at 0); pinned rows return 0. Compressed rows use the sent-body
+ *  probe. Rows of unknown compression (no `compressed` field) return 0. */
 export function rawThinkingSurcharge(r: SurchargeRow): number {
-  if (r.compressed === true) return sentProbeSurcharge(r);
+  if (r.compressed !== false) return sentProbeSurcharge(r);
   // pxpipe's pin block is in the sent body, so billed - baseline would count it.
   if ((r.pin_chars ?? 0) > 0) return 0;
   const base = r.baseline_tokens;

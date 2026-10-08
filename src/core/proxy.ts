@@ -1259,8 +1259,10 @@ function isCanonicalOpenAIPath(pathname: string, headers: Headers, hasOpenAIKey:
  *  `input_tokens` number or null on any failure. count_tokens is documented
  *  as a free endpoint (no input-token billing) — we use it once per request
  *  on the PRE-COMPRESSION body to get the ground-truth baseline. Actual
- *  post-compression tokens already come back free in the /v1/messages usage
- *  block (input_tokens + cache_create + cache_read), so no second probe. */
+ *  post-compression tokens come back free in the /v1/messages usage block
+ *  (input_tokens + cache_create + cache_read). On compressed requests a third
+ *  probe counts the sent body without pxpipe's images (src/core/sent-probe.ts),
+ *  which measures the thinking tokens the baseline count misses. */
 async function countTokensUpstream(
   countTokensUrl: string,
   body: Uint8Array,
@@ -1867,7 +1869,9 @@ let responseContentType: string | undefined;
 
         if (isMessages && messagesAnthropic) {
           baselineStatusApplies = true;
-          // Probes fire on the ORIGINAL body before the main forward so all three overlap.
+          // The two baseline probes fire on the ORIGINAL body before the main forward so
+          // they overlap it; the third probe (sent body, compressed only) starts right
+          // after the forward is issued.
           // count_tokens is not billed; ~30-80ms latency is hidden by the main forward.
           const ctBody = buildBaselineCountTokensBody(bodyIn);
           if (ctBody) {
