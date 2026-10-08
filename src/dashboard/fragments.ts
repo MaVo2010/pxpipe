@@ -190,10 +190,12 @@ function thinkingFloorLine(s: StatsPayload): string {
   const eligible = s.thinking_floor_eligible_requests ?? 0;
   if (eligible <= 0) return '';
   const measured = s.thinking_floor_measured_requests ?? 0;
-  const pct = s.saved_pct_input_only_thinking_min ?? 0;
+  const floorW = s.baseline_input_weighted_thinking_min ?? 0;
+  const actualW = s.actual_input_weighted ?? 0;
+  const pct = floorW > 0 ? (1 - actualW / floorW) * 100 : 0;
   const claim = pct >= 0
-    ? `at least ${Math.abs(pct).toFixed(0)}% fewer`
-    : `at most ${Math.abs(pct).toFixed(0)}% more`;
+    ? `at least ${Math.floor(pct)}% fewer`
+    : `at most ${Math.ceil(Math.abs(pct))}% more`;
   return (
     `<div class="hero-meta">Counting earlier replies' thinking: ${claim} · ` +
     `${numFmt(measured)} of ${numFmt(eligible)} imaged requests measured</div>`

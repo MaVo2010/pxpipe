@@ -68,11 +68,17 @@ describe('thinking floor line', () => {
   it('shows the lower bound under the unchanged headline', () => {
     const html = renderSessionSummaryFragment(payload(floor));
     expect(html).toContain('74%'); // headline unchanged: 1 - 1800/7000
-    expect(html).toContain("Counting earlier replies' thinking: at least 76% fewer · 1,412 of 1,430 imaged requests measured");
+    expect(html).toContain("Counting earlier replies' thinking: at least 75% fewer · 1,412 of 1,430 imaged requests measured");
   });
   it('words a negative lower bound as "at most … more"', () => {
-    const html = renderSessionSummaryFragment(payload({ ...floor, saved_pct_input_only_thinking_min: -3.2 }));
-    expect(html).toContain('at most 3% more');
+    const html = renderSessionSummaryFragment(payload({ ...floor, baseline_input_weighted_thinking_min: 1740 }));
+    expect(html).toContain('at most 4% more'); // 1 - 1800/1740 = -3.45%
+  });
+  it('rounds the lower bound toward the safe side', () => {
+    const tiny = renderSessionSummaryFragment(payload({ ...floor, baseline_input_weighted_thinking_min: 1799 }));
+    expect(tiny).toContain('at most 1% more'); // 1 - 1800/1799 = -0.056%
+    const exact = renderSessionSummaryFragment(payload({ ...floor, baseline_input_weighted_thinking_min: 7200 }));
+    expect(exact).toContain('at least 75% fewer'); // 1 - 1800/7200 = 75.0%
   });
   it('shows nothing when no request was eligible (older server, non-Anthropic)', () => {
     const html = renderSessionSummaryFragment(payload({ baseline_input_weighted: 7000, actual_input_weighted: 1800 }));
