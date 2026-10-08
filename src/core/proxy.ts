@@ -11,6 +11,7 @@ import {
   buildBaselineCountTokensBody,
   buildCacheablePrefixCountTokensBody,
 } from './measurement.js';
+import { buildSentCountTokensBody, estimateImageTokens, type SentProbeResult } from './sent-probe.js';
 import type { Usage } from './types.js';
 import {
   anthropicMessagesToOpenAIResponses,
@@ -1558,6 +1559,25 @@ let responseContentType: string | undefined;
           } else {
             info.baselineProbeStatus = 'ok';
           }
+          if (!info.compressed) {
+            info.sentProbeStatus = 'skipped';
+          } else {
+            let sent: SentProbeResult | null = null;
+            if (sentProbePromise) {
+              try {
+                sent = await sentProbePromise;
+              } catch {
+                sent = null;
+              }
+            }
+            if (sent) {
+              info.sentCountTokens = sent.countTokens;
+              info.sentImageTokensEst = sent.imageTokensEst;
+              info.sentProbeStatus = 'ok';
+            } else {
+              info.sentProbeStatus = 'failed';
+            }
+          }
         }
         // The Messages compatibility response exposes Anthropic's disjoint
         // usage buckets to the client. Dashboard accounting still needs the
@@ -1650,6 +1670,12 @@ let responseContentType: string | undefined;
     // Dashboard combines them for cache-aware baseline. Both run in parallel with the main forward.
     let baselinePromise: Promise<number | null> | undefined;
     let baselineCacheablePromise: Promise<number | null> | undefined;
+    // Third probe (compressed only): count_tokens of the SENT body without pxpipe's
+    // images. Billed - (this + image cost) = what the provider bills but count_tokens
+    // does not see (thinking blocks of earlier replies on Opus 5.5 / Fable 5.1).
+    let sentProbePromise: Promise<SentProbeResult | null> | undefined;
+    // Set below for compressed Anthropic requests; called once the main forward's fetch() exists.
+    let startSentProbe: (() => void) | undefined;
     let baselineStatusApplies = false;
     let responsesStreaming = false;
 
@@ -1869,6 +1895,20 @@ let responseContentType: string | undefined;
                 new Headers(ctHeaders),
               );
             }
+            if (r.info.compressed) {
+              const sentBytes = r.body;
+              const sentHeaders = new Headers(ctHeaders);
+              startSentProbe = () => {
+                // One tick later: parsing the multi-MiB sent body must not delay the main forward.
+                sentProbePromise = new Promise<void>((done) => setTimeout(done, 0)).then(async () => {
+                  const sent = buildSentCountTokensBody(bodyIn, sentBytes);
+                  if (!sent) return null;
+                  const n = await countTokensUpstream(ctUrl, sent.body, sentHeaders);
+                  if (n === null) return null;
+                  return { countTokens: n, imageTokensEst: estimateImageTokens(sent.model, sent.removedImageDims) };
+                });
+              };
+            }
           }
         }
       } catch (e) {
@@ -2072,6 +2112,8 @@ let responseContentType: string | undefined;
         // duplex is required by spec when sending a stream as body
         ...(bodyOut instanceof ReadableStream ? { duplex: 'half' } : {}),
       } as RequestInit);
+      // The third probe starts only once the forward is issued; the client never waits for it.
+      startSentProbe?.();
       const raced =
         headersTimeoutMs > 0 ? await Promise.race([upstreamFetch, headersDeadline]) : await upstreamFetch;
       clearHeadersTimer();

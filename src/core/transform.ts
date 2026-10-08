@@ -839,6 +839,14 @@ export interface TransformInfo {
    *  didn't (exclude from rollup — cacheable=0 fallback is dishonest). 'failed': no
    *  baseline. undefined: no probe attempted. */
   baselineProbeStatus?: 'ok' | 'partial' | 'failed';
+  /** count_tokens of the SENT body with pxpipe's own images removed (third probe,
+   *  compressed Anthropic requests only). See src/core/sent-probe.ts. */
+  sentCountTokens?: number;
+  /** Computed cost of the pxpipe images removed for that probe (28-px patches). */
+  sentImageTokensEst?: number;
+  /** 'ok': third probe resolved. 'failed': it was due but did not resolve.
+   *  'skipped': uncompressed, the sent body is the original and baselineTokens counts it. */
+  sentProbeStatus?: 'ok' | 'failed' | 'skipped';
 }
 
 // --- helpers ---------------------------------------------------------------

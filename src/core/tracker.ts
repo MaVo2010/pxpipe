@@ -197,6 +197,12 @@ export interface TrackEvent {
   baseline_cacheable_tokens?: number;
   /** Probe outcome. Dashboards must only attribute "$ saved" to rows where status === 'ok'. */
   baseline_probe_status?: 'ok' | 'partial' | 'failed';
+  /** count_tokens of the sent body without pxpipe images (third probe). */
+  sent_count_tokens?: number;
+  /** Computed cost of the removed pxpipe images. */
+  sent_image_tokens_est?: number;
+  /** Third-probe outcome; 'skipped' on uncompressed rows. */
+  sent_probe_status?: 'ok' | 'failed' | 'skipped';
 
   // Errors:
   error?: string;
@@ -367,6 +373,9 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.baselineProbeStatus !== undefined) {
       out.baseline_probe_status = info.baselineProbeStatus;
     }
+    if (info.sentCountTokens !== undefined) out.sent_count_tokens = info.sentCountTokens;
+    if (info.sentImageTokensEst !== undefined) out.sent_image_tokens_est = info.sentImageTokensEst;
+    if (info.sentProbeStatus !== undefined) out.sent_probe_status = info.sentProbeStatus;
   }
   if (env) {
     if (env.cwd) out.cwd = env.cwd;

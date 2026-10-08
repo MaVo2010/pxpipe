@@ -453,7 +453,7 @@ describe('e2e cache alignment — Anthropic /v1/messages through the real proxy'
     expect(JSON.parse(cap.main[0]!.body)).toEqual(JSON.parse(body));
   });
 
-  it('ROUTING + AUTH: forwards to the configured upstream; only count_tokens side calls (dual probe with a marker)', async () => {
+  it('ROUTING + AUTH: forwards to the configured upstream; only count_tokens side calls (dual probe with a marker, plus the sent-body probe)', async () => {
     const cap = await driveAnthropic(anthropicBody({ slabChars: 80_000, turns: turns(4, 20) }));
     // count_tokens is fire-and-forget — give it a tick before asserting.
     await new Promise((r) => setTimeout(r, 30));
@@ -462,10 +462,13 @@ describe('e2e cache alignment — Anthropic /v1/messages through the real proxy'
     expect(cap.main).toHaveLength(1);
     expect(cap.main[0]!.url).toBe('http://anthropic.test/v1/messages');
     expect(cap.main[0]!.apiKey).toBe('sk-ant-test');
-    // The body carries a cache_control marker, so BOTH probes fire: the full-body
-    // baseline AND the truncated cacheable-prefix probe. Exactly two, both
-    // count_tokens, no other side endpoint leaks. A suppressed second probe → red.
+    // The body carries a cache_control marker, so BOTH baseline probes fire: the
+    // full-body baseline AND the truncated cacheable-prefix probe. The request is
+    // compressed, so the third probe (sent body without pxpipe images) fires too.
+    // Exactly three, all count_tokens, no other side endpoint leaks. A suppressed
+    // probe → red.
     expect(cap.sidePaths).toEqual([
+      '/v1/messages/count_tokens',
       '/v1/messages/count_tokens',
       '/v1/messages/count_tokens',
     ]);
