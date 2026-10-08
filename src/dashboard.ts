@@ -38,6 +38,7 @@ import {
   computeBaselineInputEffWithCacheTier,
   deriveBaselineWarmth,
 } from './core/baseline.js';
+import { floorBaselineSizes, sentProbeSurcharge, type SurchargeRow } from './core/thinking-floor.js';
 import {
   computeOpenAIActualInputEff,
   computeOpenAIBaselineInputEff,
@@ -237,6 +238,14 @@ interface Totals {
    *  events that contributed to `actualInputWeighted`. The honest counter-
    *  factual cost of the unproxied path. */
   baselineInputWeighted: number;
+  /** Same rows as `baselineInputWeighted`, with the thinking surcharge added to
+   *  the baseline sizes. Lower bound; see src/core/thinking-floor.ts. Non-Anthropic
+   *  rows contribute their unchanged baseline so the sum stays paired with actual. */
+  baselineInputWeightedThinkingFloor: number;
+  /** Anthropic rows in the token headline (creditSaving). */
+  thinkingFloorEligible: number;
+  /** ...of which the third probe resolved. */
+  thinkingFloorMeasured: number;
   /** Sum of output_tokens × OUTPUT_TOKEN_RATE across the same events. Added
    *  to BOTH sides of the savings math denominator so the headline % counts
    *  output toward the total bill (it cancels in the numerator — proxy
@@ -314,6 +323,9 @@ function emptyTotals(startedAt = Date.now() / 1000): Totals {
     compressedRequests: 0,
     actualInputWeighted: 0,
     baselineInputWeighted: 0,
+    baselineInputWeightedThinkingFloor: 0,
+    thinkingFloorEligible: 0,
+    thinkingFloorMeasured: 0,
     outputWeighted: 0,
     pricedActualInputWeighted: 0,
     pricedBaselineInputWeighted: 0,
@@ -512,7 +524,7 @@ export class DashboardState {
    *  map is used only after cr>0 to split the text counterfactual into reused vs
    *  grown prefix tokens. Reconstructed identically in replay() from persisted
    *  timestamps, so live and restored numbers agree. Capped with sessions. */
-  private baselineWarmth: Map<string, { ts: number; cacheable: number; prefixSha?: string }> = new Map();
+  private baselineWarmth: Map<string, { ts: number; cacheable: number; cacheableFloor?: number; prefixSha?: string }> = new Map();
   /** Max age for reusing a prior prefix size after cr>0 has proved warmth. */
   private static readonly CACHE_TTL_SEC = 300;
   /** Hard cap on `sessions` Map entries. Keeps memory bounded in
@@ -678,6 +690,9 @@ export class DashboardState {
     let creditSaving: boolean;
     let actualInputEff: number;
     let baselineInputEff: number;
+    let floorBaselineEff: number; // thinking-aware floor; equals baselineInputEff off the Anthropic path
+    let floorEligible = false;
+    let floorMeasured = false;
     let outputEquiv: number;
     let rawActual: number; // raw tokens sent (session ratio + Details realInput)
     let rawBaseline: number; // raw text-only counterfactual tokens
@@ -702,6 +717,7 @@ export class DashboardState {
       creditSaving = e.creditSaving;
       actualInputEff = e.actualInputEff;
       baselineInputEff = e.baselineInputEff;
+      floorBaselineEff = baselineInputEff;
       outputEquiv = out;
       rawActual = inp;
       rawBaseline = creditSaving ? baselineInputEff : inp;
@@ -729,6 +745,7 @@ export class DashboardState {
       creditSaving = e.creditSaving;
       actualInputEff = e.actualInputEff;
       baselineInputEff = e.baselineInputEff;
+      floorBaselineEff = baselineInputEff;
       outputEquiv = e.outputEquiv;
       rawActual = e.rawActual;
       rawBaseline = e.rawBaseline;
@@ -808,12 +825,50 @@ export class DashboardState {
             cc5m,
           )
         : actualInputEff;
+      // Thinking-aware floor: same formula, sizes + S, own S-inclusive prior.
+      const surcharge = sentProbeSurcharge({
+        compressed,
+        input_tokens: inp,
+        cache_create_tokens: cc,
+        cache_read_tokens: cr,
+        sent_count_tokens: info?.sentCountTokens,
+        sent_image_tokens_est: info?.sentImageTokensEst,
+        sent_probe_status: info?.sentProbeStatus,
+      });
+      const floorSizes = floorBaselineSizes(baseline ?? 0, cacheable, surcharge);
+      const floorWarmth = deriveBaselineWarmth(
+        warmthPrev ? { ...warmthPrev, cacheable: warmthPrev.cacheableFloor ?? warmthPrev.cacheable } : undefined,
+        requestStartSec,
+        floorSizes.cacheable,
+        cr,
+        DashboardState.CACHE_TTL_SEC,
+        prefixShaNow,
+      );
+      floorBaselineEff = creditSaving
+        ? computeBaselineInputEffWithCacheTier(
+            floorSizes.baseline,
+            floorSizes.cacheable,
+            inp,
+            cc,
+            cr,
+            floorWarmth.warm,
+            floorWarmth.prevCacheable,
+            cc1h,
+            cc5m,
+          )
+        : actualInputEff;
+      floorEligible = creditSaving;
+      floorMeasured = creditSaving && info?.sentProbeStatus === 'ok';
       // Record this completed turn's prefix size for future cr>0 split estimates.
       // Carry the prior cacheable when this row has no probe.
       if (typeof sidNow === 'string' && sidNow.length > 0 && haveUsage) {
         this.baselineWarmth.set(sidNow, {
           ts: completionSec,
           cacheable: cacheable > 0 ? cacheable : (warmthPrev?.cacheable ?? 0),
+          cacheableFloor:
+            floorSizes.cacheable > 0
+              ? floorSizes.cacheable
+              : (warmthPrev?.cacheableFloor ?? warmthPrev?.cacheable ?? 0),
           prefixSha: prefixShaNow ?? warmthPrev?.prefixSha,
         });
         if (this.baselineWarmth.size > DashboardState.SESSION_CAP) {
@@ -888,6 +943,9 @@ export class DashboardState {
     const dollarEligible = !google;
     if (creditSaving) {
       totals.baselineInputWeighted += baselineInputEff;
+      totals.baselineInputWeightedThinkingFloor += floorBaselineEff;
+      if (floorEligible) totals.thinkingFloorEligible += 1;
+      if (floorMeasured) totals.thinkingFloorMeasured += 1;
       totals.actualInputWeighted += actualInputEff;
       totals.outputWeighted += outputEquiv;
       if (dollarEligible) {
@@ -1167,10 +1225,19 @@ export class DashboardState {
               cc5m,
             )
           : actualInputEff;
+        const floorCacheableR = floorBaselineSizes(
+          baseline ?? 0,
+          cacheable,
+          sentProbeSurcharge(t as SurchargeRow),
+        ).cacheable;
         if (typeof sidR === 'string' && sidR.length > 0 && haveUsage) {
           this.baselineWarmth.set(sidR, {
             ts: completionSecR,
             cacheable: cacheable > 0 ? cacheable : (warmthPrevR?.cacheable ?? 0),
+            cacheableFloor:
+              floorCacheableR > 0
+                ? floorCacheableR
+                : (warmthPrevR?.cacheableFloor ?? warmthPrevR?.cacheable ?? 0),
             prefixSha: prefixShaR ?? warmthPrevR?.prefixSha,
           });
           if (this.baselineWarmth.size > DashboardState.SESSION_CAP) {
@@ -1324,6 +1391,8 @@ export class DashboardState {
     const pricedOutput = totals.pricedOutputWeighted;
     const pricedSaved = pricedBaseline - pricedActual;
     const pctInput = baseline > 0 ? (saved / baseline) * 100 : 0;
+    const floorBaseline = totals.baselineInputWeightedThinkingFloor;
+    const pctInputThinkingMin = floorBaseline > 0 ? ((floorBaseline - actual) / floorBaseline) * 100 : 0;
     const baselineTotal = baseline + output;
     const actualTotal = actual + output;
     const pricedBaselineTotal = pricedBaseline + pricedOutput;
@@ -1393,6 +1462,12 @@ export class DashboardState {
       // the input-only number. New code should read saved_pct_input_only.
       saved_pct: round1(pctInput),
       saved_pct_input_only: round1(pctInput),
+      // Lower bound with the thinking tokens count_tokens skips (src/core/thinking-floor.ts).
+      baseline_input_weighted_thinking_min: Math.round(floorBaseline),
+      saved_input_tokens_thinking_min: Math.round(floorBaseline - actual),
+      saved_pct_input_only_thinking_min: round1(pctInputThinkingMin),
+      thinking_floor_measured_requests: totals.thinkingFloorMeasured,
+      thinking_floor_eligible_requests: totals.thinkingFloorEligible,
       saved_pct_of_total_bill: round1(pctTotal),
       // Honest "share of total bill saved" — measured-rows numerator over
       // ALL paid requests in the denominator (compressed + passthrough +

@@ -346,3 +346,32 @@ allowlisted, etc.) correctly show `—`. Path selects the accounting shape
    only the slab (or nothing) was imaged.
 4. Do not compare a Claude Code session's 70% to a warm Codex session's 1%
    as a regression. Different wire, different uncached bulk.
+
+## Thinking-aware floor (lower bound)
+
+`/v1/messages/count_tokens` does not count the thinking blocks of earlier
+assistant replies, but `claude-opus-5-5` and `claude-fable-5-1` are billed for
+them as input. `baseline_tokens` is therefore too low for those models, and the
+headline saving with it. The headline stays as it is; a second, corrected
+number is shown next to it.
+
+On compressed requests pxpipe runs a third `count_tokens` probe on the body it
+actually sends, with its own rendered images removed (client images stay), and
+prices the removed images with the 28-px patch formula:
+
+- `sent_count_tokens`: count of that body
+- `sent_image_tokens_est`: cost of the removed pxpipe images
+- `sent_probe_status`: `ok` / `failed` / `skipped` (uncompressed: the sent body is the original)
+
+Per row `S = max(0, input + cache_create + cache_read - sent_count_tokens - sent_image_tokens_est)`,
+and `S = 0` when the probe did not resolve. S is added to `baseline_tokens` and,
+when there is a cache marker, to `baseline_cacheable_tokens`; the cache-aware
+formula above then runs unchanged. The per-session prior for the reused/grown
+split keeps its own S-inclusive cacheable size. Thinking that pxpipe collapsed
+away is not in the sent body and is not recovered, so the result is a lower bound.
+
+`/proxy-stats` adds `baseline_input_weighted_thinking_min`,
+`saved_input_tokens_thinking_min`, `saved_pct_input_only_thinking_min`,
+`thinking_floor_measured_requests` and `thinking_floor_eligible_requests`. The
+long-run stats (`pxpipe stats`, `/api/stats.json`) add the same correction on raw
+tokens; there uncompressed rows use `S = max(0, billed - baseline_tokens)`.

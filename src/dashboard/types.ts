@@ -13,6 +13,12 @@ export interface StatsPayload {
   /** Back-compat duplicate of `saved_pct_input_only`. */
   saved_pct: number;
   saved_pct_input_only: number;
+  /** Lower bound incl. billed thinking that count_tokens skips (third probe). */
+  baseline_input_weighted_thinking_min?: number;
+  saved_input_tokens_thinking_min?: number;
+  saved_pct_input_only_thinking_min?: number;
+  thinking_floor_measured_requests?: number;
+  thinking_floor_eligible_requests?: number;
   /** DEPRECATED — denominator was measured-rows-only (cherry-picks wins). Kept for back-compat. */
   saved_pct_of_total_bill: number;
   /** Measured-rows savings ÷ ALL paid requests (compressed + passthrough + probe-failed). */
