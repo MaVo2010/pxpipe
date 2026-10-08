@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderSessionSummaryFragment } from '../src/dashboard/fragments.js';
+import { renderHeaderFragment, renderSessionSummaryFragment } from '../src/dashboard/fragments.js';
 import type { StatsPayload } from '../src/dashboard/types.js';
 
 /**
@@ -56,5 +56,31 @@ describe('renderSessionSummaryFragment hero', () => {
     const html = renderSessionSummaryFragment(payload({ compressed_requests: 0 }));
     expect(html).toContain('Warming up');
     expect(html).not.toContain('fewer tokens');
+  });
+});
+
+describe('thinking floor line', () => {
+  const floor = {
+    baseline_input_weighted: 7000, actual_input_weighted: 1800,
+    baseline_input_weighted_thinking_min: 7400, saved_pct_input_only_thinking_min: 75.7,
+    thinking_floor_measured_requests: 1412, thinking_floor_eligible_requests: 1430,
+  };
+  it('shows the lower bound under the unchanged headline', () => {
+    const html = renderSessionSummaryFragment(payload(floor));
+    expect(html).toContain('74%'); // headline unchanged: 1 - 1800/7000
+    expect(html).toContain("Counting earlier replies' thinking: at least 76% fewer · 1,412 of 1,430 imaged requests measured");
+  });
+  it('words a negative lower bound as "at most … more"', () => {
+    const html = renderSessionSummaryFragment(payload({ ...floor, saved_pct_input_only_thinking_min: -3.2 }));
+    expect(html).toContain('at most 3% more');
+  });
+  it('shows nothing when no request was eligible (older server, non-Anthropic)', () => {
+    const html = renderSessionSummaryFragment(payload({ baseline_input_weighted: 7000, actual_input_weighted: 1800 }));
+    expect(html).not.toContain('Counting earlier replies');
+  });
+  it('adds a lower-bound row to "Show the math"', () => {
+    const html = renderHeaderFragment(payload(floor), 47821);
+    expect(html).toContain('baseline incl. thinking');
+    expect(html).toContain('lower bound');
   });
 });

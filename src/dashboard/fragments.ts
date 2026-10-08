@@ -184,6 +184,22 @@ export function renderModelsFragment(
 const INPUT_USD_PER_MTOK = 10.0;
 void INPUT_USD_PER_MTOK; // suppress unused-var; renderHeaderFragment uses the server's pricing block.
 
+/** Lower-bound saving once the thinking tokens count_tokens skips are added
+ *  back (third probe). Empty when no request was eligible. */
+function thinkingFloorLine(s: StatsPayload): string {
+  const eligible = s.thinking_floor_eligible_requests ?? 0;
+  if (eligible <= 0) return '';
+  const measured = s.thinking_floor_measured_requests ?? 0;
+  const pct = s.saved_pct_input_only_thinking_min ?? 0;
+  const claim = pct >= 0
+    ? `at least ${Math.abs(pct).toFixed(0)}% fewer`
+    : `at most ${Math.abs(pct).toFixed(0)}% more`;
+  return (
+    `<div class="hero-meta">Counting earlier replies' thinking: ${claim} · ` +
+    `${numFmt(measured)} of ${numFmt(eligible)} imaged requests measured</div>`
+  );
+}
+
 // Lifetime hero. Reads the SAME cumulative weighted totals as the header strip
 // (serveStats), so the headline and the "$ saved" tiles can never disagree, and
 // the number stops swinging on tiny per-session samples. Cache-weighted on
@@ -222,6 +238,7 @@ export function renderSessionSummaryFragment(s: StatsPayload): string {
     `<strong>${kFmt(actualW)}</strong> provider-accounted input tokens vs <strong>${kFmt(baselineW)}</strong> if this same context ` +
     `stayed plain text. Your latest messages and model output are never compressed.` +
     `</div>` +
+    thinkingFloorLine(s) +
     `<div class="hero-meta">` +
     `Provider-token basis; cache discounts applied where measurable · ` +
     `output untouched (${kFmt(rawOutput)}) · no $ assumptions` +
@@ -339,6 +356,13 @@ export function renderHeaderFragment(s: StatsPayload, port: number): string {
     mathRow('baseline', s.baseline_input_weighted, '(cache-aware: cacheable×weight + cold_tail)') +
     mathRow('actual', s.actual_input_weighted, '(input + cc_5m×1.25 + cc_1h×2.0 + cr×0.10)') +
     mathRow('saved', s.saved_input_tokens, `<span class="op">=</span> baseline − actual`) +
+    ((s.thinking_floor_eligible_requests ?? 0) > 0
+      ? mathRow(
+          'baseline incl. thinking',
+          s.baseline_input_weighted_thinking_min,
+          `(lower bound: adds billed thinking that count_tokens skips, measured on ${numFmt(s.thinking_floor_measured_requests ?? 0)} of ${numFmt(s.thinking_floor_eligible_requests ?? 0)} requests)`,
+        )
+      : '') +
     `<span class="src">output excluded — identical with/without compression</span>`;
 
   const usdMath = onlyUnpriced
