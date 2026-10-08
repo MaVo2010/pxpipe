@@ -145,4 +145,59 @@ describe('dashboard thinking floor', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('prior with a failed third probe: assumes the current S was cached already', async () => {
+    const d = new DashboardState();
+    d.update(live({ ...R1, status: 'failed' }) as never);
+    d.update(live(R2) as never);
+    const s = await stats(d);
+    // R1 floor = headline 122500; R2 prior 90000 + S 2000 = 92000 reused →
+    // 9200 + 4000×1.25 + 10000 = 24200.
+    expect(s.baseline_input_weighted).toBe(146500);
+    expect(s.baseline_input_weighted_thinking_min).toBe(146700);
+  });
+
+  it('prior without sent fields: same conservative split', async () => {
+    const d = new DashboardState();
+    d.update(live({ ...R1, status: undefined }) as never);
+    d.update(live(R2) as never);
+    const s = await stats(d);
+    expect(s.baseline_input_weighted).toBe(146500);
+    expect(s.baseline_input_weighted_thinking_min).toBe(146700);
+  });
+
+  it('row whose own S was not measured counts exactly as in the headline', async () => {
+    const d = new DashboardState();
+    d.update(live(R1) as never);
+    d.update(live({ ...R2, status: 'failed' }) as never);
+    const s = await stats(d);
+    // R1 floor 123750 + R2 headline 24000.
+    expect(s.baseline_input_weighted).toBe(146500);
+    expect(s.baseline_input_weighted_thinking_min).toBe(147750);
+    expect(s.thinking_floor_measured_requests).toBe(1);
+    expect(s.thinking_floor_eligible_requests).toBe(2);
+  });
+
+  it('restart: a pre-probe row in the log gives the conservative prior', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxpipe-floor-'));
+    const file = path.join(dir, 'events.jsonl');
+    const t1 = {
+      ts: new Date(Date.now() - 5000).toISOString(), method: 'POST', path: '/v1/messages',
+      model: 'claude-fable-5-1', status: 200, duration_ms: 1000, compressed: true,
+      input_tokens: 2000, output_tokens: 100, cache_create_tokens: 30000, cache_read_tokens: 0,
+      first_user_sha8: SID, system_sha8: SYS, baseline_tokens: 100000,
+      baseline_cacheable_tokens: 90000, baseline_probe_status: 'ok',
+    };
+    fs.writeFileSync(file, JSON.stringify(t1) + '\n');
+    try {
+      const d = new DashboardState();
+      await d.replay(file);
+      d.update(live(R2) as never);
+      const s = await stats(d);
+      expect(s.baseline_input_weighted).toBe(24000);
+      expect(s.baseline_input_weighted_thinking_min).toBe(24200);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

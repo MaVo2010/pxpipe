@@ -367,8 +367,11 @@ Per row `S = max(0, input + cache_create + cache_read - sent_count_tokens - sent
 and `S = 0` when the probe did not resolve. S is added to `baseline_tokens` and,
 when there is a cache marker, to `baseline_cacheable_tokens`; the cache-aware
 formula above then runs unchanged. The per-session prior for the reused/grown
-split keeps its own S-inclusive cacheable size. Thinking that pxpipe collapsed
-away is not in the sent body and is not recovered, so the result is a lower bound.
+split keeps its own S-inclusive cacheable size. When the previous request's S
+was not measured, the current S is assumed to have been cached already (the
+conservative split). A request whose own S was not measured counts exactly as
+in the headline. Thinking that pxpipe collapsed away is not in the sent body and
+is not recovered, so the result is a lower bound.
 
 `/proxy-stats` adds `baseline_input_weighted_thinking_min`,
 `saved_input_tokens_thinking_min`, `saved_pct_input_only_thinking_min`,

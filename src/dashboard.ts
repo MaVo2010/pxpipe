@@ -826,6 +826,7 @@ export class DashboardState {
           )
         : actualInputEff;
       // Thinking-aware floor: same formula, sizes + S, own S-inclusive prior.
+      const surchargeMeasured = compressed && info?.sentProbeStatus === 'ok';
       const surcharge = sentProbeSurcharge({
         compressed,
         input_tokens: inp,
@@ -836,15 +837,20 @@ export class DashboardState {
         sent_probe_status: info?.sentProbeStatus,
       });
       const floorSizes = floorBaselineSizes(baseline ?? 0, cacheable, surcharge);
+      // Prior whose S was not measured: assume the current S was cached already
+      // (the conservative split; reuse is capped at the current size downstream).
       const floorWarmth = deriveBaselineWarmth(
-        warmthPrev ? { ...warmthPrev, cacheable: warmthPrev.cacheableFloor ?? warmthPrev.cacheable } : undefined,
+        warmthPrev
+          ? { ...warmthPrev, cacheable: warmthPrev.cacheableFloor ?? warmthPrev.cacheable + surcharge }
+          : undefined,
         requestStartSec,
         floorSizes.cacheable,
         cr,
         DashboardState.CACHE_TTL_SEC,
         prefixShaNow,
       );
-      floorBaselineEff = creditSaving
+      // A row whose own S was not measured counts exactly as in the headline.
+      floorBaselineEff = creditSaving && surchargeMeasured
         ? computeBaselineInputEffWithCacheTier(
             floorSizes.baseline,
             floorSizes.cacheable,
@@ -856,19 +862,21 @@ export class DashboardState {
             cc1h,
             cc5m,
           )
-        : actualInputEff;
+        : baselineInputEff;
       floorEligible = creditSaving;
-      floorMeasured = creditSaving && info?.sentProbeStatus === 'ok';
+      floorMeasured = creditSaving && surchargeMeasured;
       // Record this completed turn's prefix size for future cr>0 split estimates.
       // Carry the prior cacheable when this row has no probe.
       if (typeof sidNow === 'string' && sidNow.length > 0 && haveUsage) {
         this.baselineWarmth.set(sidNow, {
           ts: completionSec,
           cacheable: cacheable > 0 ? cacheable : (warmthPrev?.cacheable ?? 0),
+          // S-inclusive size only when this row's S was measured; undefined = unknown.
+          // No cacheable probe: carry the prior's floor as `cacheable` carries.
           cacheableFloor:
-            floorSizes.cacheable > 0
-              ? floorSizes.cacheable
-              : (warmthPrev?.cacheableFloor ?? warmthPrev?.cacheable ?? 0),
+            cacheable > 0
+              ? (surchargeMeasured ? floorSizes.cacheable : undefined)
+              : warmthPrev?.cacheableFloor,
           prefixSha: prefixShaNow ?? warmthPrev?.prefixSha,
         });
         if (this.baselineWarmth.size > DashboardState.SESSION_CAP) {
@@ -1225,6 +1233,7 @@ export class DashboardState {
               cc5m,
             )
           : actualInputEff;
+        const surchargeMeasuredR = compressed && t.sent_probe_status === 'ok';
         const floorCacheableR = floorBaselineSizes(
           baseline ?? 0,
           cacheable,
@@ -1234,10 +1243,11 @@ export class DashboardState {
           this.baselineWarmth.set(sidR, {
             ts: completionSecR,
             cacheable: cacheable > 0 ? cacheable : (warmthPrevR?.cacheable ?? 0),
+            // Same rule as update(): measured → S-inclusive, unmeasured → unknown.
             cacheableFloor:
-              floorCacheableR > 0
-                ? floorCacheableR
-                : (warmthPrevR?.cacheableFloor ?? warmthPrevR?.cacheable ?? 0),
+              cacheable > 0
+                ? (surchargeMeasuredR ? floorCacheableR : undefined)
+                : warmthPrevR?.cacheableFloor,
             prefixSha: prefixShaR ?? warmthPrevR?.prefixSha,
           });
           if (this.baselineWarmth.size > DashboardState.SESSION_CAP) {
