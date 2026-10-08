@@ -1722,3 +1722,11 @@ Expected: control S/billed median close to 0 (a few tenths of a percent at most)
 - [ ] **Step 3: Notes**
 
 Write the result into `$A/README.txt`, into the memory note (new dated section: rollout time, PID, bundle sha, rollback command, control result, corrected Opus saving per size class), and update its line in `MEMORY.md`. Report to the operator in plain words: what the dashboard now shows, what the control says, what stays open (Variant B, proxy-off control run).
+
+## Amendments after the final review (2026-10-08)
+
+- Task 7, extra measurements old vs new on the same requests: `duration_ms` p50 and p99, TTFB (`first_byte_ms`) on the three largest bodies, and a screenshot of the hero card from the side-port dashboard (`http://127.0.0.1:47899/dashboard`) showing the new line. Check that the two dashed separators read acceptably; otherwise give the new line its own class.
+- Task 9, floored-mean control: on first-request-of-session rows (all models) and on all rows of models without the thinking gap (`claude-opus-5`, Sonnet, Haiku), report Σmax(0, S) / Σbilled. Acceptance: below 0.1 %. Above that, a noise deadband is added to `sentProbeSurcharge` before the number is trusted.
+- Task 9, headline coverage: the hourly share of rows with `baseline_probe_status` `failed` or `partial`, 24 h before vs after the rollout. Rollback trigger: more than +1 percentage point. If it trips, add a 60 s third-probe backoff after any count_tokens 429.
+- Task 9, collapse shrink: count how often `collapsed_turns` decreases between consecutive measured requests of one session (the known limit (2) in docs/CACHING_AND_SAVINGS.md).
+- Task 6 battery: `.superpowers/sdd/2026-10-08-thinking-baseline-floor/task-6-mut.py` (9 mutants) replaced the inline 4-mutant script after the review fixes. The expected suite count is the post-fix count.
