@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { newSummary, fold, renderTextReport, runStats } from '../src/stats.js';
+import { newSummary, fold, renderTextReport, runStats, summaryToJson } from '../src/stats.js';
 import type { TrackEvent } from '../src/core/tracker.js';
 
 function ev(partial: Partial<TrackEvent>): TrackEvent {
@@ -202,5 +202,40 @@ describe('stats aggregator', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('thinking floor (raw tokens)', () => {
+  const rows = [
+    // uncompressed: billed 1100 vs baseline 1000 → S = 100 (exact)
+    ev({ compressed: false, baseline_tokens: 1000, baseline_probe_status: 'ok', input_tokens: 1100 }),
+    // compressed, probe ok: 32000 - (25000 + 6000) → S = 1000
+    ev({ compressed: true, baseline_tokens: 50000, baseline_probe_status: 'ok', input_tokens: 2000,
+         cache_create_tokens: 30000, sent_count_tokens: 25000, sent_image_tokens_est: 6000, sent_probe_status: 'ok' }),
+    // compressed, older row without the fields → S = 0
+    ev({ compressed: true, baseline_tokens: 40000, baseline_probe_status: 'ok', input_tokens: 10000 }),
+  ];
+  it('adds S per row on top of the measured baseline', () => {
+    const s = newSummary();
+    for (const r of rows) fold(s, r);
+    expect(s.baselineTokensTotal).toBe(91000);
+    expect(s.baselineThinkingFloorTotal).toBe(92100);
+    expect(s.measuredActualTokensTotal).toBe(43100);
+    expect(s.thinkingFloorMeasuredEvents).toBe(1);
+    const j = summaryToJson(s);
+    expect(j.baselineThinkingFloorTotal).toBe(92100);
+    expect(j.savedTokensThinkingFloorTotal).toBe(49000);
+    expect(j.thinkingFloorMeasuredEvents).toBe(1);
+    expect(renderTextReport(s)).toContain('saved incl. thinking');
+  });
+  it('never subtracts: an uncompressed row billed below its baseline adds 0', () => {
+    const s = newSummary();
+    fold(s, ev({ compressed: false, baseline_tokens: 1000, baseline_probe_status: 'ok', input_tokens: 990 }));
+    expect(s.baselineThinkingFloorTotal).toBe(1000);
+  });
+  it('rows without a usable probe stay out, as for the existing totals', () => {
+    const s = newSummary();
+    fold(s, ev({ compressed: false, baseline_tokens: 1000, baseline_probe_status: 'failed', input_tokens: 1100 }));
+    expect(s.baselineThinkingFloorTotal).toBe(0);
   });
 });

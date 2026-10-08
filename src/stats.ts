@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import type { TrackEvent } from './core/tracker.js';
+import { rawThinkingSurcharge } from './core/thinking-floor.js';
 
 // ---- pure aggregator ------------------------------------------------------
 
@@ -49,6 +50,11 @@ export interface Summary {
   /** Count of probe-OK rows contributing to the two totals above — the honest
    *  denominator for the measured-savings headline. */
   baselineMeasuredEvents: number;
+  /** Same probe-OK rows as baselineTokensTotal with the thinking surcharge added
+   *  (raw tokens, lower bound; src/core/thinking-floor.ts rawThinkingSurcharge). */
+  baselineThinkingFloorTotal: number;
+  /** Compressed probe-OK rows whose third (sent-body) probe resolved. */
+  thinkingFloorMeasuredEvents: number;
   /** Number of events whose cache_read_tokens > 0 — i.e. the prompt cache
    *  actually hit. */
   cacheHitEvents: number;
@@ -84,6 +90,8 @@ export function newSummary(): Summary {
     baselineTokensTotal: 0,
     measuredActualTokensTotal: 0,
     baselineMeasuredEvents: 0,
+    baselineThinkingFloorTotal: 0,
+    thinkingFloorMeasuredEvents: 0,
     cacheHitEvents: 0,
     eventsWithUsage: 0,
     durationMs: [],
@@ -152,6 +160,8 @@ export function fold(s: Summary, ev: TrackEvent): Summary {
       (ev.cache_create_tokens ?? 0) +
       (ev.cache_read_tokens ?? 0);
     s.baselineMeasuredEvents++;
+    s.baselineThinkingFloorTotal += baseline + rawThinkingSurcharge(ev);
+    if (ev.compressed === true && ev.sent_probe_status === 'ok') s.thinkingFloorMeasuredEvents++;
   }
 
   if (ev.cwd) {
@@ -262,6 +272,10 @@ export function renderTextReport(s: Summary): string {
   lines.push(`  actual tokens:      ${fmtN(s.measuredActualTokensTotal).padStart(12)}`);
   lines.push(
     `  saved:              ${fmtN(savedTokens).padStart(12)}  (${fmtPct(savedTokens, s.baselineTokensTotal)})`,
+  );
+  const savedFloor = s.baselineThinkingFloorTotal - s.measuredActualTokensTotal;
+  lines.push(
+    `  saved incl. thinking: ${fmtN(savedFloor).padStart(10)}  (${fmtPct(savedFloor, s.baselineThinkingFloorTotal)}, lower bound; third probe on ${fmtN(s.thinkingFloorMeasuredEvents)} compressed requests)`,
   );
   // Raw-token basis: cache reads counted at face value, NOT cost-weighted, so
   // this % is deliberately a different quantity from the dashboard's
@@ -385,6 +399,9 @@ export function summaryToJson(s: Summary): Record<string, unknown> {
     measuredActualTokensTotal: s.measuredActualTokensTotal,
     baselineMeasuredEvents: s.baselineMeasuredEvents,
     savedTokensTotal: s.baselineTokensTotal - s.measuredActualTokensTotal,
+    baselineThinkingFloorTotal: s.baselineThinkingFloorTotal,
+    savedTokensThinkingFloorTotal: s.baselineThinkingFloorTotal - s.measuredActualTokensTotal,
+    thinkingFloorMeasuredEvents: s.thinkingFloorMeasuredEvents,
     cacheHitEvents: s.cacheHitEvents,
     eventsWithUsage: s.eventsWithUsage,
     durationP50: percentile(sortedDur, 50),
