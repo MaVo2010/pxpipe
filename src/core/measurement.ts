@@ -37,15 +37,23 @@ export function buildCountTokensBodies(bytes: BytesLike): CountTokensBodies {
   };
 }
 
+/** Keep only the fields /v1/messages/count_tokens accepts. Null when the result
+ *  lacks a string `model` or a `messages` array (the endpoint would 400). */
+export function pickCountTokensFields(obj: Record<string, unknown>): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(obj)) {
+    if (COUNT_TOKENS_FIELDS.has(k)) out[k] = obj[k];
+  }
+  if (typeof out.model !== 'string' || !Array.isArray(out.messages)) return null;
+  return out;
+}
+
 export function buildBaselineCountTokensBody(bytes: BytesLike): Uint8Array | null {
   const b = toUint8Array(bytes);
   try {
     const obj = JSON.parse(new TextDecoder().decode(b)) as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(obj)) {
-      if (COUNT_TOKENS_FIELDS.has(k)) out[k] = obj[k];
-    }
-    if (typeof out.model !== 'string' || !Array.isArray(out.messages)) return null;
+    const out = pickCountTokensFields(obj);
+    if (!out) return null;
     return new TextEncoder().encode(JSON.stringify(out));
   } catch {
     return null;
