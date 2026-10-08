@@ -18,6 +18,7 @@ export interface SurchargeRow {
   sent_count_tokens?: number;
   sent_image_tokens_est?: number;
   sent_probe_status?: string;
+  pin_chars?: number;
 }
 
 export function billedInputTokens(r: SurchargeRow): number {
@@ -37,6 +38,8 @@ export function sentProbeSurcharge(r: SurchargeRow): number {
  *  use the sent-body probe. */
 export function rawThinkingSurcharge(r: SurchargeRow): number {
   if (r.compressed === true) return sentProbeSurcharge(r);
+  // pxpipe's pin block is in the sent body, so billed - baseline would count it.
+  if ((r.pin_chars ?? 0) > 0) return 0;
   const base = r.baseline_tokens;
   if (typeof base !== 'number' || !(base > 0)) return 0;
   return Math.max(0, billedInputTokens(r) - base);

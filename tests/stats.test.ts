@@ -238,4 +238,9 @@ describe('thinking floor (raw tokens)', () => {
     fold(s, ev({ compressed: false, baseline_tokens: 1000, baseline_probe_status: 'failed', input_tokens: 1100 }));
     expect(s.baselineThinkingFloorTotal).toBe(0);
   });
+  it('a pinned uncompressed row adds 0: billed - baseline would count the pin block', () => {
+    const s = newSummary();
+    fold(s, ev({ compressed: false, baseline_tokens: 1000, baseline_probe_status: 'ok', input_tokens: 1100, pin_chars: 275 }));
+    expect(s.baselineThinkingFloorTotal).toBe(1000);
+  });
 });

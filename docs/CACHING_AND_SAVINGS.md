@@ -361,7 +361,7 @@ prices the removed images with the 28-px patch formula:
 
 - `sent_count_tokens`: count of that body
 - `sent_image_tokens_est`: cost of the removed pxpipe images
-- `sent_probe_status`: `ok` / `failed` / `skipped` (uncompressed: the sent body is the original)
+- `sent_probe_status`: `ok` / `failed` / `skipped` (uncompressed: the sent body is the original, unless a session pin rewrote it)
 
 Per row `S = max(0, input + cache_create + cache_read - sent_count_tokens - sent_image_tokens_est)`,
 and `S = 0` when the probe did not resolve. S is added to `baseline_tokens` and,
@@ -377,4 +377,4 @@ is not recovered, so the result is a lower bound.
 `saved_input_tokens_thinking_min`, `saved_pct_input_only_thinking_min`,
 `thinking_floor_measured_requests` and `thinking_floor_eligible_requests`. The
 long-run stats (`pxpipe stats`, `/api/stats.json`) add the same correction on raw
-tokens; there uncompressed rows use `S = max(0, billed - baseline_tokens)`.
+tokens; there uncompressed rows use `S = max(0, billed - baseline_tokens)`, and `S = 0` when a session pin rewrote the request (`pin_chars > 0`).
