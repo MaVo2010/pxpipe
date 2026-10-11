@@ -166,3 +166,29 @@ failure rate (429s). Readable after a few hours of Opus traffic.
 - Changing the headline number or any existing field.
 - Recovering thinking tokens that pxpipe collapses away (Variant B).
 - A proxy-off control run on real traffic (costs real tokens; can follow later).
+
+## Side-port trial 2026-10-11
+
+Folder `/srv/pxpipe-rollback/trial-thinking-floor-2026-10-11/` (README, scripts, raw logs). Old = live
+`dist/node.js` sha16 `e0fbb34a45705585`, new = branch build sha16 `4842d05ad4bf1c91`, both with the live
+unit's environment (jb-12 @195). Stub upstream that ignores thinking blocks in `count_tokens` and bills
+500 tokens per thinking block; test client with a thinking block in every round; 11 requests per run,
+runs alternating old1, new1, old2, new2. All verdicts PASS.
+
+| run | compressed | count_tokens calls | third probe ok | max \|S − 500·blocks\| | image estimate = stub | transform_ms median | duration_ms p50 | peak RSS |
+|---|---|---|---|---|---|---|---|---|
+| old1 | 11/11 | 11 | – | – | – | 1763 | 1882 | 849 MB |
+| new1 | 11/11 | 22 | 11/11 | 0 | 11/11 | 1705 | 1869 | 934 MB |
+| old2 | 11/11 | 11 | – | – | – | 1872 | 1995 | 853 MB |
+| new2 | 11/11 | 22 | 11/11 | 0 | 11/11 | 1736 | 1891 | 882 MB |
+
+- Images, collapsed turns and `history_reason` are identical per request between old and new.
+- The third probe body is small: median 798 KiB, max 2.2 MiB, against up to 26 MiB forwarded.
+- S counts exactly the thinking left in the sent body (for example 422 of 600 blocks in the
+  600-round session, the rest collapsed away), so the result stays below the original's thinking.
+- First byte on the three largest bodies varies by about 250 ms between runs of the old build alone;
+  the Python stub also parses the third probe under its GIL, so the trial cannot show an effect smaller
+  than that. Real traffic is checked live (Task 9).
+- Hero screenshot `hero-new.png`: the new line sits between two dashed separators and reads as two
+  footnotes. It shows 0 % because the test client sends no `cache_control` markers, and without a
+  cacheable probe the dashboard credits nothing (existing rule).
