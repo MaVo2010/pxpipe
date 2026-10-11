@@ -255,6 +255,12 @@ const READ_FIRST_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
  *  History is even denser (tool_use JSON dominates), so 2.0 is doubly conservative. */
 export const HISTORY_CHARS_PER_TOKEN = 2.0;
 
+/** Tokens per TEXT char (as counted by countOutgoingTextChars) for sizing a whole
+ *  Claude request before any probe. Median of count_tokens / text chars on
+ *  claude-opus-5-5 requests of 70-130k tokens, 2026-10-08..11 (p10 0.40, p90 0.45).
+ *  Used only by the profile's `historyMinTokens` floor. */
+export const ANTHROPIC_TOKENS_PER_TEXT_CHAR = 0.43;
+
 /** Chars-per-token for the `pxpipe export` *reporting* estimate (factsheet & savings %).
  *  Less conservative than the gate's CHARS_PER_TOKEN=4: reporting wants an accurate
  *  figure (~3.7 for source/prose text), not a safe-side under-estimate. Single source
@@ -2059,6 +2065,7 @@ async function runHistoryCollapseAndFinalize(
   opts: TransformOptions,
   droppedCodepoints: Map<number, number>,
   pins: Pin[],
+  historyBelowFloor = false,
 ): Promise<{ body: Uint8Array; info: TransformInfo; collapsed: boolean }> {
   let collapsedFlag = false;
   // Same wire cap as every other imaging path: the collapse buys tokens with
@@ -2069,6 +2076,11 @@ async function runHistoryCollapseAndFinalize(
     bumpPassthrough(info, 'image_budget');
     info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
     info.historyReason ??= 'too_many_images';
+  } else if (historyBelowFloor) {
+    // Profile floor (`historyMinTokens`): a small request keeps its history as
+    // text, because moving the collapse boundary would rewrite the cached
+    // history more often than the images save.
+    info.historyReason = 'below_min_tokens';
   } else if (Array.isArray(req.messages) && req.messages.length > 0) {
     const historyCpt = opts.charsPerToken !== undefined
       ? o.charsPerToken
@@ -2236,6 +2248,12 @@ export async function transformRequest(
   // later path (slab, tool_results, history) rewrites content in place.
   info.nativeImages = countNativeImages(req.messages);
   info.nativeImageBytes = countNativeImageBytes(req.messages);
+
+  // History floor (profile `historyMinTokens`): sized once from the ORIGINAL
+  // text, before any rewrite. Only walked when a floor is configured.
+  const historyMinTokens = profile?.historyMinTokens;
+  const historyBelowFloor = historyMinTokens !== undefined
+    && countOutgoingTextChars(req) * ANTHROPIC_TOKENS_PER_TEXT_CHAR < historyMinTokens;
 
   // Two byte ceilings, one limit. Narrowed once, here, so the slab, the
   // tool_results and the collapse all spend from the same headroom.
@@ -2450,7 +2468,7 @@ export async function transformRequest(
     // If history collapses, we flip `info.compressed = true` and let the
     // library wrapper return reason='applied'; otherwise this still
     // populates `outgoingTextChars` for the regression denominator.
-    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins);
+    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins, historyBelowFloor);
     if (finalized.collapsed) {
       info.compressed = true;
       return { body: finalized.body, info };
@@ -2469,7 +2487,7 @@ export async function transformRequest(
     info.reason = 'image_budget';
     bumpPassthrough(info, 'image_budget');
     info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
-    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins);
+    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins, historyBelowFloor);
     return { body: pinsRewrote || finalized.collapsed ? finalized.body : body, info };
   }
 
@@ -2534,7 +2552,7 @@ export async function transformRequest(
     info.reason = `not_profitable (slab=${combined.length} chars)`;
     bumpPassthrough(info, 'not_profitable');
     // Slab not profitable but history may still be collapsable — try before returning.
-    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins);
+    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins, historyBelowFloor);
     if (finalized.collapsed) {
       info.compressed = true;
       return { body: finalized.body, info };
@@ -2573,7 +2591,7 @@ export async function transformRequest(
     bumpPassthrough(info, 'image_budget');
     if (slabOverBytes && !slabOverCount) info.imageByteSkips = (info.imageByteSkips ?? 0) + 1;
     else info.imageBudgetSkips = (info.imageBudgetSkips ?? 0) + 1;
-    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins);
+    const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints, pins, historyBelowFloor);
     if (finalized.collapsed) {
       info.compressed = true;
       return { body: finalized.body, info };
@@ -2675,7 +2693,10 @@ export async function transformRequest(
   // History is single-col dense; use slab cpt unless host pinned charsPerToken.
   // protectedPrefix excludes the slab-bearing first user message — collapsing it
   // would reduce slab images to [image] placeholders and destroy the cache anchor.
-  if (Array.isArray(req.messages) && req.messages.length > 0) {
+  if (historyBelowFloor) {
+    // Profile floor (`historyMinTokens`), same rule as runHistoryCollapseAndFinalize.
+    info.historyReason = 'below_min_tokens';
+  } else if (Array.isArray(req.messages) && req.messages.length > 0) {
     const historyCpt = opts.charsPerToken !== undefined
       ? o.charsPerToken
       : HISTORY_CHARS_PER_TOKEN;

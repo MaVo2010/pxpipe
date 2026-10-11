@@ -139,6 +139,13 @@ export interface GptModelProfile {
    *  columns overshoots the provider's no-resize width and is silently
    *  downscaled, which removes the legibility it was meant to buy. */
   historyStyle?: GptRenderStyle;
+  /** Optional floor for collapsing Anthropic message history: a request
+   *  estimated below this many tokens keeps its history as text (the static
+   *  slab is still imaged). Undefined in every shipped profile. Measured on
+   *  claude-opus-5-5, 2026-10-08..11: collapsing below ~100k request tokens
+   *  cost more than it saved, because each move of the collapse boundary
+   *  rewrites the cached history at the cache-write rate. */
+  historyMinTokens?: number;
   /** Maximum serialized provider request produced by pxpipe. Undefined leaves
    *  legacy behavior unchanged. Checked in the transform (which falls back to
    *  the original body when imaging would overshoot) and enforced again on the
@@ -558,6 +565,10 @@ function parseEnvProfiles(raw: string): Map<string, GptModelProfile> {
     const historyStripCols = p.historyStripCols === undefined
       ? base.historyStripCols
       : posInt(p.historyStripCols, base.historyStripCols ?? base.stripCols);
+    // 0, negative or non-numeric means "no floor" rather than a silent fallback.
+    const historyMinTokens = p.historyMinTokens === undefined
+      ? base.historyMinTokens
+      : nonNegativeInt(p.historyMinTokens, 0) || undefined;
 
     out.set(key, {
       vision: isValidVision(p.vision) ? p.vision : base.vision,
@@ -574,6 +585,7 @@ function parseEnvProfiles(raw: string): Map<string, GptModelProfile> {
       style,
       historyStripCols,
       historyStyle,
+      historyMinTokens,
       maxSerializedRequestBytes: p.maxSerializedRequestBytes === undefined
         ? base.maxSerializedRequestBytes
         : posInt(p.maxSerializedRequestBytes, base.maxSerializedRequestBytes ?? 0) || undefined,
