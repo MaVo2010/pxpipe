@@ -5,22 +5,26 @@
  * an extension of the collapsed range on a fine, unchanged grid missed the cache in 10 % of
  * cases; an extension whose freeze step had grown, or whose whole range was one chunk, missed
  * in 95-99 %. Those misses rewrote every history image AND the text tail behind it (one
- * 860k-token session wrote 852k tokens to fold in nine messages). Two causes:
+ * 860k-token session wrote 852k tokens to fold in nine messages). This file pins cause A:
  *
  *  A. The session-state record (sticky freeze step, cache liveness) was keyed by the user's
  *     opening prompt alone. Conversations that open with the same words - also across models -
  *     shared one record, so one large conversation's coarse step (1280) became the floor of
  *     every other one, and those rendered their whole range as a single chunk.
- *  B. At the image budget the collapse doubled the freeze step to fit instead of trimming the
- *     range. Every doubling re-cuts every chunk, so a warm cache was thrown away.
+ *
+ * A second change was tried and dropped: never coarsening a warm grid, trimming the range at
+ * the image budget instead. On a side-port trial (2026-10-12, a 321-request warm Opus session)
+ * it cost 6.4 % more than the old doubling: one avoided rewrite against a text tail that grew
+ * behind the fixed cut and was read on every request. The single-chunk grid is the real harm;
+ * that is a separate change.
  *
  * Run just this file:  pnpm vitest run tests/history-grid-stable.test.ts
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createProxy } from '../src/core/proxy.js';
 import { transformRequest } from '../src/core/transform.js';
-import { collapseHistory, HISTORY_SYNTHETIC_INTRO } from '../src/core/history.js';
 import { markCacheDead, recordFreezeStep, resetSessionState } from '../src/core/session-state.js';
+import { toTrackEvent } from '../src/core/tracker.js';
 import type { Message } from '../src/core/types.js';
 
 const big = (n: number) => 'x'.repeat(n);
@@ -39,16 +43,6 @@ function convo(firstReply: unknown, n: number, chars = 3500): Message[] {
   return out;
 }
 const request = (messages: Message[], model = 'claude-3-5-sonnet') => enc({ model, messages });
-
-/** Base64 of every image in the synthetic history message, in order. */
-function historyImages(body: Uint8Array): string[] {
-  const out: string[] = [];
-  for (const m of dec(body).messages as any[]) {
-    if (!Array.isArray(m.content) || m.content[0]?.text !== HISTORY_SYNTHETIC_INTRO) continue;
-    for (const b of m.content) if (b?.type === 'image') out.push(b.source.data);
-  }
-  return out;
-}
 
 describe('A: session state is keyed per conversation, not per opening prompt', () => {
   beforeEach(() => resetSessionState());
@@ -114,6 +108,34 @@ describe('A: session state is keyed per conversation, not per opening prompt', (
     expect(r.info.sessionStateKey).toBeUndefined();
   });
 
+  it('ignores cache_control on the first reply (Claude Code moves its markers every turn)', async () => {
+    const plain = await transformRequest(request(convo([{ type: 'text', text: 'reply A' }], 120)));
+    const marked = await transformRequest(request(convo([
+      { type: 'text', text: 'reply A', cache_control: { type: 'ephemeral' } },
+    ], 120)));
+    expect(plain.info.sessionStateKey).toBeTruthy();
+    expect(marked.info.sessionStateKey).toBe(plain.info.sessionStateKey);
+  });
+
+  it('ignores tool_use input (the call id already names the call)', async () => {
+    const one = await transformRequest(request(convo([{ type: 'tool_use', id: 'toolu_01', name: 'Read', input: { file_path: '/x' } }], 120)));
+    const two = await transformRequest(request(convo([{ type: 'tool_use', id: 'toolu_01', name: 'Read', input: { file_path: '/y' } }], 120)));
+    expect(one.info.sessionStateKey).toBeTruthy();
+    expect(two.info.sessionStateKey).toBe(one.info.sessionStateKey);
+  });
+
+  it('skips a first reply without visible text (thinking only) and keys on the next one', async () => {
+    const r = await transformRequest(request(convo([{ type: 'thinking', thinking: 'let me see', signature: 'sig-1' }], 120)));
+    expect(r.info.sessionStateKey).toBeTruthy();
+  });
+
+  it('the event log carries the key as session_state_sha8', async () => {
+    const r = await transformRequest(request(convo('reply A', 120)));
+    const ev = toTrackEvent({ method: 'POST', path: '/v1/messages', model: 'claude-3-5-sonnet', status: 200, durationMs: 1, info: r.info });
+    expect(r.info.sessionStateKey).toBeTruthy();
+    expect(ev.session_state_sha8).toBe(r.info.sessionStateKey);
+  });
+
   it('a dead-cache mark under the new key reaches the repack', async () => {
     const first = await transformRequest(request(convo('reply A', 120)));
     markCacheDead(first.info.sessionStateKey);
@@ -124,95 +146,6 @@ describe('A: session state is keyed per conversation, not per opening prompt', (
     const other = await transformRequest(request(convo('reply B', 120)));
     expect(other.info.historyPackFill).toBeUndefined();
   });
-});
-
-/** Many short turns: each 10-message chunk is one partly filled page, so the grid, not the
- *  text, is what overflows a small image budget. Assistant turns only carry the transcript
- *  (user prompts stay native text), so every message is an assistant/user pair of tool-free text. */
-function shortTurns(n: number): Message[] {
-  const out: Message[] = [];
-  for (let i = 0; i < n; i++) {
-    out.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `turn ${i}: ` + big(150) });
-  }
-  return out;
-}
-
-describe('B: a warm grid is never coarsened to fit the image budget', () => {
-  const opts = { imageBudget: 12, keepTail: 4 };
-
-  it('library default still coarsens (unchanged for callers without session state)', async () => {
-    const { info } = await collapseHistory(shortTurns(304), () => true, opts);
-    expect(info.collapsedTurns).toBeGreaterThan(0);
-    expect(info.freezeStep).toBeGreaterThan(10);
-  });
-
-  it('with coarsening off it keeps the base step and trims the range instead', async () => {
-    const { info } = await collapseHistory(shortTurns(304), () => true, { ...opts, coarsenForBudget: false });
-    expect(info.collapsedTurns).toBeGreaterThan(0);
-    expect(info.freezeStep).toBe(10);
-    expect(info.budgetTrimmed).toBe(true);
-    expect(info.collapsedImages).toBeLessThanOrEqual(12);
-  });
-
-  it('with coarsening off the images already sent stay byte-identical as the conversation grows', async () => {
-    const before = await collapseHistory(shortTurns(304), () => true, { ...opts, coarsenForBudget: false });
-    const after = await collapseHistory(shortTurns(354), () => true, { ...opts, coarsenForBudget: false });
-    const a = before.info.collapsedPngs.map((p) => Buffer.from(p).toString('base64'));
-    const b = after.info.collapsedPngs.map((p) => Buffer.from(p).toString('base64'));
-    expect(a.length).toBeGreaterThan(0);
-    expect(b.slice(0, a.length)).toEqual(a);
-    expect(after.info.freezeStep).toBe(before.info.freezeStep);
-  });
-});
-
-// Both collapse paths: without an imaged slab (runHistoryCollapseAndFinalize) and with one
-// (the main path's step 6). The imaged slab is a large static system prompt.
-describe.each([
-  { path: 'small-slab path', system: undefined as unknown },
-  { path: 'imaged-slab path', system: [{ type: 'text', text: 'You are a coding agent. '.repeat(5000), cache_control: { type: 'ephemeral' } }] },
-])('B: transform wiring - coarsen only when the cache is cold ($path)', ({ system }) => {
-  beforeEach(() => resetSessionState());
-  // ~1000 short turns: at the base step the grid needs >= 100 pages, over the 80-image budget,
-  // while a perfectly packed render would fit.
-  const many = (extra = 0) => {
-    const msgs = convo('reply A', 1000, 400);
-    for (let i = 0; i < extra; i++) msgs.push({ role: i % 2 === 0 ? 'assistant' : 'user', content: `later ${i}: ` + big(400) });
-    return msgs;
-  };
-  const req = (messages: Message[]) => enc({ model: 'claude-3-5-sonnet', ...(system ? { system } : {}), messages });
-
-  it('takes the path it names', async () => {
-    const r = await transformRequest(req(many()));
-    const slabImages = (r.info.imageCount ?? 0) - (r.info.collapsedImages ?? 0);
-    if (system) expect(slabImages).toBeGreaterThan(0);
-    else expect(slabImages).toBe(0);
-  }, 60_000);
-
-  it('a warm session keeps the base step and trims; its earlier images stay byte-identical', async () => {
-    const r1 = await transformRequest(req(many()));
-    expect(r1.info.collapsedTurns).toBeGreaterThan(0);
-    expect(r1.info.historyFreezeStep).toBe(10);
-    expect(r1.info.historyBudgetTrimmed).toBe(true);
-
-    const r2 = await transformRequest(req(many(50)));
-    expect(r2.info.historyFreezeStep).toBe(10);
-    const a = historyImages(r1.body);
-    const b = historyImages(r2.body);
-    expect(a.length).toBeGreaterThan(0);
-    expect(b.slice(0, a.length)).toEqual(a);
-  }, 60_000);
-
-  it('a cold session may still coarsen for density, and the next warm turn keeps that grid', async () => {
-    const r1 = await transformRequest(req(many()));
-    markCacheDead(r1.info.sessionStateKey);
-    const r2 = await transformRequest(req(many()));
-    expect(r2.info.historyPackFill).toBe(true);
-    expect(r2.info.historyFreezeStep).toBeGreaterThan(10);
-
-    const r3 = await transformRequest(req(many(50)));
-    expect(r3.info.historyPackFill).toBeUndefined();
-    expect(r3.info.historyFreezeStep).toBeGreaterThanOrEqual(r2.info.historyFreezeStep!);
-  }, 60_000);
 });
 
 describe('A: the proxy feeds the provider answer back under the conversation key', () => {
@@ -249,13 +182,16 @@ describe('A: the proxy feeds the provider answer back under the conversation key
   });
 
   async function send(body: Uint8Array): Promise<void> {
-    const proxy = createProxy({ upstream: 'http://anthropic.test', apiKey: 'sk-ant-test', onRequest: () => {} });
+    // The cache bookkeeping runs after the response, right before the proxy emits its
+    // request event, so the event is the signal that it has landed (no timer to race).
+    let landed!: () => void;
+    const event = new Promise<void>((r) => { landed = r; });
+    const proxy = createProxy({ upstream: 'http://anthropic.test', apiKey: 'sk-ant-test', onRequest: () => landed() });
     const res = await proxy(new Request('http://localhost/v1/messages', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': 'sk-ant-test' }, body,
     }));
     await res.text();
-    // The cache bookkeeping runs after the response; let it land.
-    await new Promise((r) => setTimeout(r, 50));
+    await event;
   }
 
   it('a rejected request marks this conversation dead, so its next turn may repack', async () => {

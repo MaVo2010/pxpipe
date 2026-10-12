@@ -99,15 +99,6 @@ export interface HistoryCollapseOptions {
    *  re-render re-keys the whole history. Rounded UP to a power-of-two multiple of
    *  `freezeChunk` so chunk boundaries stay a subset of the base grid. Default 0. */
   minFreezeStep: number;
-  /** May the freeze step grow past `minFreezeStep` to fit the image budget? Growing it
-   *  re-cuts every chunk, so every history image changes and the provider re-writes them
-   *  and the whole text tail behind them at the cache-write rate. With `false` the grid
-   *  stays put and the range is trimmed at the budget instead; the turns behind the cut
-   *  stay live text. Callers that know the upstream cache is warm pass `false` and only
-   *  allow growth when it is cold (transform.ts: `historyGridTuning`). Measured
-   *  2026-10-08..12: extensions on a grown grid missed the cache 95 %, on an unchanged
-   *  fine grid 10 %. Default true (library callers without session state). */
-  coarsenForBudget: boolean;
   /** Decoded PNG bytes this collapse may emit. Chunks are admitted oldest first
    *  on their MEASURED weight; when one does not fit, the range is cut there and
    *  everything behind the cut stays live text. The cut is a closed boundary on
@@ -155,7 +146,6 @@ export const HISTORY_DEFAULTS: HistoryCollapseOptions = {
   imageBudget: ANTHROPIC_HISTORY_IMAGE_BUDGET,
   packFill: false,
   minFreezeStep: 0,
-  coarsenForBudget: true,
   byteBudget: Infinity,
 };
 
@@ -921,11 +911,6 @@ export async function collapseHistory(
   // keeping chunk boundaries a SUBSET of the base grid, so a chunk frozen at the
   // coarse step spans whole base chunks and stays byte-identical as long as the
   // step never shrinks again (the caller pins it via minFreezeStep).
-  //
-  // Growing the step is itself a re-cut, though: every chunk changes, and with it
-  // every image and the whole text tail behind them. So it is only done when the
-  // caller allows it (`coarsenForBudget`, i.e. no warm cache to lose); otherwise
-  // the admission loop trims the range at the image budget on the current grid.
   const baseStep = o.freezeChunk > 0 ? o.freezeChunk : collapseLen - protectedPrefix;
   const rangeLen = collapseLen - protectedPrefix;
   const pagesFor = (s: number): number => {
@@ -953,7 +938,7 @@ export async function collapseHistory(
   // set when the upstream cache is dead anyway (cold session / after a 500).
   const packedPages = Math.max(1, Math.ceil(sumLen(0, rangeLen) / pageChars));
   const goal = Math.min(budget, o.packFill ? packedPages + 1 : Infinity);
-  while (o.coarsenForBudget && step < rangeLen && pagesFor(step) + markSplits > goal) step *= 2;
+  while (step < rangeLen && pagesFor(step) + markSplits > goal) step *= 2;
   info.freezeStep = step;
   const ends = new Set<number>();
   for (let e = protectedPrefix + step; e < collapseLen; e += step) ends.add(e);

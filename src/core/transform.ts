@@ -2079,23 +2079,15 @@ export function countNativeImages(messages: readonly Message[] | undefined): num
  *
  * `packFill`/`minFreezeStep` come from the session store: repack only when the
  * upstream cache is provably dead, and never below a grid this session already
- * froze at. See {@link noteHistoryRequest}. `coarsenForBudget` follows the same
- * rule: a grid that does not fit the budget is coarsened only on a cold cache;
- * on a warm one the range is trimmed instead, because coarsening re-writes every
- * history image and the text tail behind them.
+ * froze at. See {@link noteHistoryRequest}.
  */
 function historyGridTuning(
   info: TransformInfo,
-): { imageBudget: number; packFill: boolean; minFreezeStep: number; coarsenForBudget: boolean } {
+): { imageBudget: number; packFill: boolean; minFreezeStep: number } {
   const headroom = imageHeadroom(info);
   const imageBudget = Math.max(1, Math.min(ANTHROPIC_HISTORY_IMAGE_BUDGET, headroom));
   const session = noteHistoryRequest(info.sessionStateKey);
-  return {
-    imageBudget,
-    packFill: session.cold,
-    minFreezeStep: session.minFreezeStep,
-    coarsenForBudget: session.cold,
-  };
+  return { imageBudget, packFill: session.cold, minFreezeStep: session.minFreezeStep };
 }
 
 async function runHistoryCollapseAndFinalize(
@@ -2163,7 +2155,6 @@ async function runHistoryCollapseAndFinalize(
         imageBudget: tuning.imageBudget,
         packFill: tuning.packFill,
         minFreezeStep: tuning.minFreezeStep,
-        coarsenForBudget: tuning.coarsenForBudget,
         byteBudget: imageByteHeadroom(info, o.maxImageBytes),
       },
     );
@@ -2771,7 +2762,6 @@ export async function transformRequest(
         imageBudget: tuning.imageBudget,
         packFill: tuning.packFill,
         minFreezeStep: tuning.minFreezeStep,
-        coarsenForBudget: tuning.coarsenForBudget,
         byteBudget: imageByteHeadroom(info, o.maxImageBytes),
       },
     );
