@@ -702,6 +702,12 @@ export interface TransformInfo {
   systemSha8?: string;
   /** sha8 of first user message text (first 4 KiB). Rough thread/session id. */
   firstUserSha8?: string;
+  /** Key of this conversation's record in the session store (sticky freeze step,
+   *  cache liveness): sha8 of the first user text, the first reply's visible text and
+   *  tool_use ids, and the model. `firstUserSha8` alone merged every conversation that
+   *  opens with the same prompt, so one conversation's coarse grid became the floor of
+   *  all the others. Undefined until the first reply exists (no history to collapse). */
+  sessionStateKey?: string;
   /** Raw bytes of the first rendered image. Dashboard preview only; NOT persisted to JSONL. */
   firstImagePng?: Uint8Array;
   firstImageWidth?: number;
@@ -1468,6 +1474,32 @@ export function firstUserText(req: MessagesRequest): string {
 }
 
 /**
+ * What tells apart conversations that open with the same prompt: the first reply
+ * that has visible text or tool calls. Text blocks contribute their text, tool_use
+ * blocks their id (unique per call); thinking blocks are left out because a client
+ * may drop them from older turns, which would change the key mid-conversation.
+ * Capped at 4 KiB like {@link firstUserText}. Empty before the first reply.
+ */
+export function firstReplyText(req: MessagesRequest): string {
+  for (const m of req.messages ?? []) {
+    if (m.role !== 'assistant') continue;
+    if (typeof m.content === 'string') {
+      if (m.content !== '') return m.content.slice(0, 4096);
+      continue;
+    }
+    if (!Array.isArray(m.content)) continue;
+    const parts: string[] = [];
+    for (const block of m.content) {
+      if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text);
+      else if (block?.type === 'tool_use' && typeof block.id === 'string') parts.push(`tool_use:${block.id}`);
+    }
+    const text = parts.join('\n');
+    if (text !== '') return text.slice(0, 4096);
+  }
+  return '';
+}
+
+/**
  * True when the first message carries a `<system-reminder>` block — the
  * envelope Claude Code uses to inject CLAUDE.md project instructions. Such a
  * message must never be rendered to pixels: imaged rules read as description
@@ -2047,15 +2079,23 @@ export function countNativeImages(messages: readonly Message[] | undefined): num
  *
  * `packFill`/`minFreezeStep` come from the session store: repack only when the
  * upstream cache is provably dead, and never below a grid this session already
- * froze at. See {@link noteHistoryRequest}.
+ * froze at. See {@link noteHistoryRequest}. `coarsenForBudget` follows the same
+ * rule: a grid that does not fit the budget is coarsened only on a cold cache;
+ * on a warm one the range is trimmed instead, because coarsening re-writes every
+ * history image and the text tail behind them.
  */
 function historyGridTuning(
   info: TransformInfo,
-): { imageBudget: number; packFill: boolean; minFreezeStep: number } {
+): { imageBudget: number; packFill: boolean; minFreezeStep: number; coarsenForBudget: boolean } {
   const headroom = imageHeadroom(info);
   const imageBudget = Math.max(1, Math.min(ANTHROPIC_HISTORY_IMAGE_BUDGET, headroom));
-  const session = noteHistoryRequest(info.firstUserSha8);
-  return { imageBudget, packFill: session.cold, minFreezeStep: session.minFreezeStep };
+  const session = noteHistoryRequest(info.sessionStateKey);
+  return {
+    imageBudget,
+    packFill: session.cold,
+    minFreezeStep: session.minFreezeStep,
+    coarsenForBudget: session.cold,
+  };
 }
 
 async function runHistoryCollapseAndFinalize(
@@ -2123,10 +2163,11 @@ async function runHistoryCollapseAndFinalize(
         imageBudget: tuning.imageBudget,
         packFill: tuning.packFill,
         minFreezeStep: tuning.minFreezeStep,
+        coarsenForBudget: tuning.coarsenForBudget,
         byteBudget: imageByteHeadroom(info, o.maxImageBytes),
       },
     );
-    recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
+    recordFreezeStep(info.sessionStateKey, histInfo.freezeStep);
     if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
     if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
     if (tuning.packFill) info.historyPackFill = true;
@@ -2355,6 +2396,12 @@ export async function transformRequest(
   const firstUser = firstUserText(req);
   const firstUserSha = firstUser ? await sha8(firstUser) : undefined;
   if (firstUserSha) info.firstUserSha8 = firstUserSha;
+  // The session store's key: the opening prompt alone merged conversations that
+  // start alike (see TransformInfo.sessionStateKey).
+  const firstReply = firstReplyText(req);
+  if (firstUser && firstReply) {
+    info.sessionStateKey = await sha8(`${firstUser}\u0000${firstReply}\u0000${req.model ?? ''}`);
+  }
 
   // Canary: slab tags whose content churns within a session bust the image
   // cache every turn — report them regardless of the hardcoded lists.
@@ -2724,10 +2771,11 @@ export async function transformRequest(
         imageBudget: tuning.imageBudget,
         packFill: tuning.packFill,
         minFreezeStep: tuning.minFreezeStep,
+        coarsenForBudget: tuning.coarsenForBudget,
         byteBudget: imageByteHeadroom(info, o.maxImageBytes),
       },
     );
-    recordFreezeStep(info.firstUserSha8, histInfo.freezeStep);
+    recordFreezeStep(info.sessionStateKey, histInfo.freezeStep);
     if (histInfo.freezeStep !== undefined) info.historyFreezeStep = histInfo.freezeStep;
     if (histInfo.budgetTrimmed) info.historyBudgetTrimmed = true;
     if (tuning.packFill) info.historyPackFill = true;

@@ -36,8 +36,8 @@ function countImages(msgs: Message[]): number {
 
 /**
  * `n` closed turns. The first user message is held constant across calls so the
- * session key (sha8 of the first user text) is stable — that is exactly how the
- * proxy identifies a conversation.
+ * session key (first user text + first reply + model, `info.sessionStateKey`) is
+ * stable — that is exactly how the proxy identifies a conversation.
  */
 function convo(n: number, chars = 3500): Message[] {
   const out: Message[] = [{ role: 'user', content: 'SESSION ANCHOR: ' + big(200) }];
@@ -140,7 +140,7 @@ describe('history grid wiring — packFill only on a dead cache', () => {
 
   it('repacks after the cache was marked dead (e.g. an upstream reject)', async () => {
     const first = await transformRequest(request(convo(120, 3500)));
-    const key = first.info.firstUserSha8;
+    const key = first.info.sessionStateKey;
     expect(key).toBeTruthy();
 
     markCacheDead(key);
@@ -153,7 +153,7 @@ describe('history grid wiring — packFill only on a dead cache', () => {
 
   it('the dead-cache flag is consumed — the next turn is append-only again', async () => {
     const first = await transformRequest(request(convo(120, 3500)));
-    markCacheDead(first.info.firstUserSha8);
+    markCacheDead(first.info.sessionStateKey);
     await transformRequest(request(convo(120, 3500)));
     const third = await transformRequest(request(convo(130, 3500)));
     expect(third.info.historyPackFill).toBeUndefined();

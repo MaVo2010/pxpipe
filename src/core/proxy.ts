@@ -2190,14 +2190,14 @@ let teed: Response;
       // freeze this session was protecting protects nothing: let the next turn
       // re-cut the grid for density instead of preserving dead bytes.
       if (responseLeftNoCache(upstreamRes.status, errorBody)) {
-        markCacheDead(info?.firstUserSha8);
+        markCacheDead(info?.sessionStateKey);
       }
       // Feed the provider's own cache accounting back into the session store. A
       // read proves the prefix was live; a create proves one was just written.
       // Either way the next turn must not re-cut the grid — which the wall clock
       // alone could not tell, and got wrong on most gaps that mattered.
       noteCacheOutcome(
-        info?.firstUserSha8,
+        info?.sessionStateKey,
         usage?.cache_read_input_tokens,
         usage?.cache_creation_input_tokens,
       );
