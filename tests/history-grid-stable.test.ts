@@ -148,6 +148,39 @@ describe('A: session state is keyed per conversation, not per opening prompt', (
   });
 });
 
+// Both collapse paths record the step they froze at: without an imaged slab
+// (runHistoryCollapseAndFinalize) and with one (the main path's step 6).
+describe.each([
+  { path: 'small-slab path', system: undefined as unknown },
+  { path: 'imaged-slab path', system: [{ type: 'text', text: 'You are a coding agent. '.repeat(5000), cache_control: { type: 'ephemeral' } }] },
+])('A: the frozen step is recorded under the conversation key ($path)', ({ system }) => {
+  beforeEach(() => resetSessionState());
+  const req = (messages: Message[]) => enc({ model: 'claude-3-5-sonnet', ...(system ? { system } : {}), messages });
+
+  it('takes the path it names', async () => {
+    const r = await transformRequest(req(convo('reply A', 300, 400)));
+    const slabImages = (r.info.imageCount ?? 0) - (r.info.collapsedImages ?? 0);
+    if (system) expect(slabImages).toBeGreaterThan(0);
+    else expect(slabImages).toBe(0);
+  }, 60_000);
+
+  it('the next request of the same conversation keeps the coarser step', async () => {
+    // ~1000 short turns need >= 100 pages at the base step, over the 80-image budget,
+    // so the collapse doubles the step and freezes it.
+    const long = await transformRequest(req(convo('reply A', 1000, 400)));
+    expect(long.info.historyFreezeStep).toBeGreaterThan(10);
+
+    const short = await transformRequest(req(convo('reply A', 300, 400)));
+    expect(short.info.collapsedTurns).toBeGreaterThan(0);
+    expect(short.info.historyFreezeStep).toBeGreaterThanOrEqual(long.info.historyFreezeStep!);
+
+    // Control: without the recorded floor the same request stays on the base step.
+    resetSessionState();
+    const fresh = await transformRequest(req(convo('reply A', 300, 400)));
+    expect(fresh.info.historyFreezeStep).toBe(10);
+  }, 60_000);
+});
+
 describe('A: the proxy feeds the provider answer back under the conversation key', () => {
   let ambient: string | undefined;
   let realFetch: typeof fetch;
