@@ -160,6 +160,13 @@ export interface TrackEvent {
   /** Session-store key of the conversation (TransformInfo.sessionStateKey). Unlike
    *  first_user_sha8 it separates conversations that open with the same prompt. */
   session_state_sha8?: string;
+  /** sha8 of the client's session id (metadata.user_id), on every parsed request. */
+  client_session_sha8?: string;
+  /** First outgoing difference to the previous request of the same conversation
+   *  ('new' | 'none' | 'head' | 'tools' | 'system' | 'm<i>'), see src/prefix-telemetry.ts. */
+  prefix_diverge?: string;
+  prefix_msgs?: number;
+  prefix_ms?: number;
 
   // From Anthropic/OpenAI Usage:
   input_tokens?: number;
@@ -365,6 +372,10 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.systemSha8) out.system_sha8 = info.systemSha8;
     if (info.firstUserSha8) out.first_user_sha8 = info.firstUserSha8;
     if (info.sessionStateKey) out.session_state_sha8 = info.sessionStateKey;
+    if (info.clientSessionSha8) out.client_session_sha8 = info.clientSessionSha8;
+    if (info.prefixDiverge) out.prefix_diverge = info.prefixDiverge;
+    if (info.prefixMsgs !== undefined) out.prefix_msgs = info.prefixMsgs;
+    if (info.prefixMs !== undefined) out.prefix_ms = info.prefixMs;
     if (info.baselineTokens !== undefined && info.baselineTokens > 0) {
       out.baseline_tokens = info.baselineTokens;
     }

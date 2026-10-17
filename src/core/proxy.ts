@@ -65,6 +65,10 @@ export interface ProxyConfig {
   /** Persist 4xx diagnostics: the gzipped request body plus the upstream error
    *  body. Off by default because either side may contain prompts or secrets. */
   captureErrorReqBody?: boolean;
+  /** Host hook, called once per Anthropic Messages request after the response,
+   *  with the exact outgoing body. May fill the prefix* fields of `info`
+   *  (see src/prefix-telemetry.ts). Errors are swallowed. */
+  prefixTelemetry?: (body: Uint8Array, info: TransformInfo) => void | Promise<void>;
   /** Abort the upstream request if response headers have not arrived within this
    *  many ms. Cleared once headers land, so long generations are unaffected.
    *  0 disables. */
@@ -1579,6 +1583,18 @@ let responseContentType: string | undefined;
             } else {
               info.sentProbeStatus = 'failed';
             }
+          }
+        }
+        // Prefix divergence (host hook): after the response, on the exact bytes we
+        // sent, so it adds no latency to the request. Anthropic Messages wire only.
+        if (
+          config.prefixTelemetry && info && reqBodyBytes && reqBodyBytes.byteLength > 0
+          && isMessages && !isGoogle && !bridgedGptMessages && !bridgedChatMessages
+        ) {
+          try {
+            await config.prefixTelemetry(reqBodyBytes, info);
+          } catch {
+            // Telemetry must never cost the event row.
           }
         }
         // The Messages compatibility response exposes Anthropic's disjoint

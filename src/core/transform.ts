@@ -52,6 +52,7 @@ import {
   ANTHROPIC_HISTORY_IMAGE_BUDGET,
 } from './history.js';
 import { noteHistoryRequest, recordFreezeStep, sessionAnchorText } from './session-state.js';
+import { clientSessionId } from './client-session.js';
 import type { GptHistoryOptions } from './openai-history.js';
 import { CACHE_CREATE_RATE, CACHE_READ_RATE } from './baseline.js';
 import { visionTokens, type VisionPricing } from './vision-cost.js';
@@ -708,6 +709,17 @@ export interface TransformInfo {
    *  opens with the same prompt, so one conversation's coarse grid became the floor of
    *  all the others. Undefined until the first reply exists (no history to collapse). */
   sessionStateKey?: string;
+  /** sha8 of the client's session id (`metadata.user_id`, see client-session.ts).
+   *  Set on every parsed request, including those that never collapse. */
+  clientSessionSha8?: string;
+  /** Where this request's outgoing prefix first differs from the previous request
+   *  of the same conversation: 'new' | 'none' | 'head' | 'tools' | 'system' | 'm<i>'.
+   *  Filled by the host after the response (prefix-telemetry.ts), not by the transform. */
+  prefixDiverge?: string;
+  /** Number of outgoing messages the divergence was computed over. */
+  prefixMsgs?: number;
+  /** Host CPU time spent on the divergence fingerprint, ms. */
+  prefixMs?: number;
   /** Raw bytes of the first rendered image. Dashboard preview only; NOT persisted to JSONL. */
   firstImagePng?: Uint8Array;
   firstImageWidth?: number;
@@ -1307,7 +1319,7 @@ function relocateAnchorToHistoryImage(messages: Message[] | undefined, anchorOrd
  *  narrow — a block that merely *starts* with the header but carries body text
  *  after it is real prefix content (that shape is what liftBillingBlock splits
  *  apart), and must keep counting. */
-function isEndpointIgnoredBillingBlock(block: unknown): boolean {
+export function isEndpointIgnoredBillingBlock(block: unknown): boolean {
   const b = block as { type?: string; text?: string; cache_control?: unknown } | null;
   if (!b || b.type !== 'text' || typeof b.text !== 'string') return false;
   if (b.cache_control) return false; // a cached block is hashed, wherever it sits
@@ -2274,6 +2286,10 @@ export async function transformRequest(
     info.reason = `parse_error: ${(e as Error).message}`;
     return { body, info };
   }
+
+  // Client session key first, so every early exit below still carries it.
+  const clientSession = clientSessionId((req as { metadata?: unknown }).metadata);
+  if (clientSession) info.clientSessionSha8 = await sha8(clientSession);
 
   // Price the caller's OWN images before we rewrite anything: they occupy the
   // same wire cap we are about to spend from. Counted once, here, because every

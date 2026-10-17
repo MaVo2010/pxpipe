@@ -25,6 +25,7 @@ import {
   type ExportResult,
 } from './core/export.js';
 import { readExportTextFile } from './export-collect.js';
+import { makePrefixTelemetry } from './prefix-telemetry.js';
 import {
   toTrackEvent,
   TRACK_BODY_INLINE_MAX,
@@ -344,6 +345,9 @@ Environment:
                           chunks are byte-identical across turns, so
                           re-rendering them is wasted CPU; 0 disables the cache.
                           Live counters at /proxy-stats under render_cache.
+  PXPIPE_PREFIX_TELEMETRY  set to 0 to stop logging prefix_diverge/prefix_msgs/
+                          prefix_ms (first outgoing difference to the previous
+                          request of the same conversation). On by default.
   PXPIPE_DEBUG_CAPTURE_4XX  debug: set to 1 to persist full 4xx request and
                           upstream error bodies (prompts + any secrets in
                           context) to disk. Off by default.
@@ -1286,6 +1290,7 @@ async function main(): Promise<void> {
     openAIModels: opts.openAIModels,
     cloudflareModels: opts.cloudflareModels,
     captureErrorReqBody: opts.captureErrorReqBody,
+    prefixTelemetry: process.env.PXPIPE_PREFIX_TELEMETRY === '0' ? undefined : makePrefixTelemetry(),
     maxRequestBytes: opts.maxRequestBytes,
     // Per-request transform options:
     //   1. Runtime kill switch — when the dashboard "passthrough" toggle
