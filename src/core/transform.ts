@@ -718,6 +718,8 @@ export interface TransformInfo {
   prefixDiverge?: string;
   /** Number of outgoing messages the divergence was computed over. */
   prefixMsgs?: number;
+  /** Message count of the previous request it was compared with (unset when 'new'). */
+  prefixPrevMsgs?: number;
   /** Host CPU time spent on the divergence fingerprint, ms. */
   prefixMs?: number;
   /** Raw bytes of the first rendered image. Dashboard preview only; NOT persisted to JSONL. */

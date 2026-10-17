@@ -166,6 +166,7 @@ export interface TrackEvent {
    *  ('new' | 'none' | 'head' | 'tools' | 'system' | 'm<i>'), see src/prefix-telemetry.ts. */
   prefix_diverge?: string;
   prefix_msgs?: number;
+  prefix_prev_msgs?: number;
   prefix_ms?: number;
 
   // From Anthropic/OpenAI Usage:
@@ -375,6 +376,7 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.clientSessionSha8) out.client_session_sha8 = info.clientSessionSha8;
     if (info.prefixDiverge) out.prefix_diverge = info.prefixDiverge;
     if (info.prefixMsgs !== undefined) out.prefix_msgs = info.prefixMsgs;
+    if (info.prefixPrevMsgs !== undefined) out.prefix_prev_msgs = info.prefixPrevMsgs;
     if (info.prefixMs !== undefined) out.prefix_ms = info.prefixMs;
     if (info.baselineTokens !== undefined && info.baselineTokens > 0) {
       out.baseline_tokens = info.baselineTokens;

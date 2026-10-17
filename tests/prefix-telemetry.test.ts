@@ -146,9 +146,12 @@ describe('makePrefixTelemetry', () => {
     t(bytes(req([u('q1', true)])), i1);
     expect(i1).toMatchObject({ prefixDiverge: 'new', prefixMsgs: 1 });
     expect(typeof (i1 as { prefixMs?: number }).prefixMs).toBe('number');
+    expect((i1 as { prefixPrevMsgs?: number }).prefixPrevMsgs).toBeUndefined();
     const i2 = { ...baseInfo(), clientSessionSha8: 'cafe0001', sessionStateKey: 'aaaa0001' };
     t(bytes(req([u('q1'), a('r1'), u('q2', true)])), i2);
-    expect(i2).toMatchObject({ prefixDiverge: 'none', prefixMsgs: 3 });
+    // prefixPrevMsgs makes the row self-contained: diverge === `m${prev - 1}` means only
+    // the previous LAST message changed, without joining on the previous event.
+    expect(i2).toMatchObject({ prefixDiverge: 'none', prefixMsgs: 3, prefixPrevMsgs: 1 });
     // A sibling conversation in the same client session that opens with the SAME
     // prompt (a second subagent) has its own key and is not compared with the first.
     const i3 = { ...baseInfo(), clientSessionSha8: 'cafe0001', sessionStateKey: 'bbbb0002' };
@@ -191,7 +194,10 @@ describe('proxy wiring', () => {
     let captured: ProxyEvent | undefined;
     const proxy = createProxy({
       transform: {},
-      prefixTelemetry: (body, info) => { seen = new TextDecoder().decode(body); info.prefixDiverge = 'none'; },
+      prefixTelemetry: (body, info) => {
+        seen = new TextDecoder().decode(body);
+        Object.assign(info, { prefixDiverge: 'none', prefixMsgs: 5, prefixPrevMsgs: 3, prefixMs: 1.5 });
+      },
       onRequest: (e) => { captured = e; },
     });
     const res = await proxy(new Request('http://localhost/v1/messages', {
@@ -204,7 +210,7 @@ describe('proxy wiring', () => {
     globalThis.fetch = real;
     expect(seen).toBe(sentBody);
     const ev = toTrackEvent(captured!);
-    expect(ev.prefix_diverge).toBe('none');
+    expect(ev).toMatchObject({ prefix_diverge: 'none', prefix_msgs: 5, prefix_prev_msgs: 3, prefix_ms: 1.5 });
     expect(ev.client_session_sha8).toMatch(/^[0-9a-f]{8}$/);
   });
 });

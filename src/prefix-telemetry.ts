@@ -87,18 +87,24 @@ export class PrefixDivergence {
   constructor(private readonly cap = 512) {}
 
   observe(key: string, fp: PrefixFingerprint): string {
+    return this.compare(key, fp).diverge;
+  }
+
+  /** Like observe, plus the previous request's message count (undefined when new). */
+  compare(key: string, fp: PrefixFingerprint): { diverge: string; prevMsgs?: number } {
     const prev = this.last.get(key);
     this.last.delete(key);
     this.last.set(key, fp);
     if (this.last.size > this.cap) this.last.delete(this.last.keys().next().value as string);
-    if (!prev) return 'new';
-    if (prev.tools !== fp.tools) return 'tools';
-    if (prev.system !== fp.system) return 'system';
-    if (prev.head !== fp.head) return 'head';
-    for (let i = 0; i < prev.msgs.length; i++) {
-      if (fp.msgs[i] !== prev.msgs[i]) return `m${i}`;
+    if (!prev) return { diverge: 'new' };
+    const prevMsgs = prev.msgs.length;
+    if (prev.tools !== fp.tools) return { diverge: 'tools', prevMsgs };
+    if (prev.system !== fp.system) return { diverge: 'system', prevMsgs };
+    if (prev.head !== fp.head) return { diverge: 'head', prevMsgs };
+    for (let i = 0; i < prevMsgs; i++) {
+      if (fp.msgs[i] !== prev.msgs[i]) return { diverge: `m${i}`, prevMsgs };
     }
-    return 'none';
+    return { diverge: 'none', prevMsgs };
   }
 }
 
@@ -117,8 +123,10 @@ export function makePrefixTelemetry(cap = 512): (body: Uint8Array, info: Transfo
     const fp = prefixFingerprint(req);
     const conv = info.sessionStateKey ?? info.firstUserSha8 ?? `m0:${fp.msgs[0] ?? '-'}`;
     const key = `${info.clientSessionSha8 ?? '-'}|${String(req.model ?? '')}|${conv}`;
-    info.prefixDiverge = state.observe(key, fp);
+    const { diverge, prevMsgs } = state.compare(key, fp);
+    info.prefixDiverge = diverge;
     info.prefixMsgs = fp.msgs.length;
+    if (prevMsgs !== undefined) info.prefixPrevMsgs = prevMsgs;
     info.prefixMs = Math.round((performance.now() - t0) * 10) / 10;
   };
 }
