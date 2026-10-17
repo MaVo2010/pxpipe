@@ -131,6 +131,11 @@ describe('prefixFingerprint', () => {
     expect(h({}, 'context-1m-2025-08-07')).not.toBe(base);
     expect(h({ metadata: { user_id: 'x' }, stream: true, max_tokens: 99 })).toBe(base);
   });
+  it('head ignores the server-side thread field (previous_message_id moves every request)', () => {
+    const h = (thread: unknown) => prefixFingerprint(req([u('q')], { thread })).head;
+    expect(h({ type: 'continue', previous_message_id: 'msg_1' })).toBe(h({ type: 'continue', previous_message_id: 'msg_2' }));
+    expect(h({ type: 'create' })).toBe(prefixFingerprint(req([u('q')])).head);
+  });
 });
 
 describe('PrefixDivergence', () => {
@@ -260,6 +265,25 @@ describe('makePrefixTelemetry', () => {
     await t(bytes({ ...body, messages: [u('other opening'), a('r'), u('x')] }), i3, { status: 200 });
     expect(i3.prefixDiverge).toBe('new');
   });
+  it('marks thread continuations and keeps them out of the comparison', async () => {
+    const t = makePrefixTelemetry();
+    const inf = () => ({ ...baseInfo(), clientSessionSha8: 's', prefixKey: 'k', prefixOpenKey: 'k' });
+    const create = inf();
+    await t(bytes(req([u('q1'), a('r1'), u('q2')], { thread: { type: 'create' } })), create, { status: 200 });
+    expect(create).toMatchObject({ threadType: 'create', prefixDiverge: 'new' });
+    // A continuation carries only the delta: judging it against the full request
+    // would report a rewrite at m0 on every turn.
+    const cont = inf();
+    await t(bytes({ model: 'claude-opus-5-5', thread: { type: 'continue', previous_message_id: 'msg_1' }, messages: [u('delta')] }), cont, { status: 200 });
+    expect(cont).toMatchObject({ threadType: 'continue', prefixDiverge: 'thread', prefixMsgs: 1 });
+    expect(cont.prefixPrevMsgs).toBeUndefined();
+    expect(cont.prefixReuseMsgs).toBeUndefined();
+    // ...and never becomes the reference: a later full request still meets the create.
+    const full = inf();
+    await t(bytes(req([u('q1'), a('r1'), u('q2'), a('r2'), u('q3')])), full, { status: 200 });
+    expect(full).toMatchObject({ prefixDiverge: 'none', prefixPrevMsgs: 3 });
+    expect(full.threadType).toBeUndefined();
+  });
   it('never throws on a body it cannot read', async () => {
     const t = makePrefixTelemetry();
     const i = baseInfo();
@@ -313,12 +337,12 @@ describe('proxy wiring', () => {
     const { captured, sentBody } = await run((body, info, c) => {
       seen = new TextDecoder().decode(body);
       ctx = c;
-      Object.assign(info, { prefixDiverge: 'none', prefixMsgs: 5, prefixPrevMsgs: 3, prefixReuseMsgs: 3, prefixMs: 1.5 });
+      Object.assign(info, { prefixDiverge: 'none', prefixMsgs: 5, prefixPrevMsgs: 3, prefixReuseMsgs: 3, prefixMs: 1.5, threadType: 'continue' });
     });
     expect(seen).toBe(sentBody);
     expect(ctx).toEqual({ status: 200, beta: 'beta-x' });
     const ev = toTrackEvent(captured!);
-    expect(ev).toMatchObject({ prefix_diverge: 'none', prefix_msgs: 5, prefix_prev_msgs: 3, prefix_reuse_msgs: 3, prefix_ms: 1.5 });
+    expect(ev).toMatchObject({ prefix_diverge: 'none', prefix_msgs: 5, prefix_prev_msgs: 3, prefix_reuse_msgs: 3, prefix_ms: 1.5, thread_type: 'continue' });
     expect(ev.client_session_sha8).toMatch(/^[0-9a-f]{8}$/);
   });
   it('still writes the event row when the hook throws', async () => {

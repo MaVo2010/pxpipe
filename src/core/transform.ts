@@ -728,6 +728,9 @@ export interface TransformInfo {
    *  Internal; not persisted. */
   prefixKey?: string;
   prefixOpenKey?: string;
+  /** `thread.type` of the request ('create' | 'continue'): Claude Code >= 2.1.281
+   *  server-side threads; a 'continue' body carries only the delta. Set by the host. */
+  threadType?: string;
   /** Host CPU time spent on the divergence fingerprint, ms. */
   prefixMs?: number;
   /** Raw bytes of the first rendered image. Dashboard preview only; NOT persisted to JSONL. */

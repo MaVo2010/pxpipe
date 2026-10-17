@@ -170,6 +170,8 @@ export interface TrackEvent {
   /** Longest recent request of the conversation fully contained in this one (reusable part). */
   prefix_reuse_msgs?: number;
   prefix_ms?: number;
+  /** Server-side thread request type ('create' | 'continue'), see TransformInfo.threadType. */
+  thread_type?: string;
 
   // From Anthropic/OpenAI Usage:
   input_tokens?: number;
@@ -381,6 +383,7 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.prefixPrevMsgs !== undefined) out.prefix_prev_msgs = info.prefixPrevMsgs;
     if (info.prefixReuseMsgs !== undefined) out.prefix_reuse_msgs = info.prefixReuseMsgs;
     if (info.prefixMs !== undefined) out.prefix_ms = info.prefixMs;
+    if (info.threadType) out.thread_type = info.threadType;
     if (info.baselineTokens !== undefined && info.baselineTokens > 0) {
       out.baseline_tokens = info.baselineTokens;
     }

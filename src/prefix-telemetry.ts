@@ -17,6 +17,9 @@
  *              field except messages/tools/system/metadata/stream/max_tokens,
  *              plus the anthropic-beta header)
  *     'm<i>'   message i is the first that differs, or the first missing one
+ *     'thread' a server-side thread continuation (thread_type 'continue', Claude
+ *              Code >= 2.1.281 behind warp): the body is only the delta, the
+ *              history lives upstream; not compared and never a reference
  *   prefix_prev_msgs   that request's message count
  *   prefix_reuse_msgs  the longest recent request fully contained in this one —
  *                      the part the prompt cache could have served
@@ -57,8 +60,10 @@ export interface PrefixFingerprint {
   msgs: Uint32Array;
 }
 
-/** Top-level fields that do not key the prompt cache (or are hashed separately). */
-const NOT_HEAD = new Set(['messages', 'tools', 'system', 'metadata', 'stream', 'max_tokens']);
+/** Top-level fields that do not key the prompt cache (or are hashed separately).
+ *  `thread` (Claude Code >= 2.1.281 server-side threads) carries a
+ *  previous_message_id that moves on every request; it is reported as threadType. */
+const NOT_HEAD = new Set(['messages', 'tools', 'system', 'metadata', 'stream', 'max_tokens', 'thread']);
 
 function feed(h: Hash, v: unknown): void {
   if (typeof v === 'string') {
@@ -180,11 +185,24 @@ export function makePrefixTelemetry(
       return; // not ours to judge — leave the fields unset
     }
     if (!req || typeof req !== 'object' || !Array.isArray(req.messages)) return;
+    const thread = req.thread as { type?: unknown } | undefined;
+    if (thread && typeof thread === 'object' && typeof thread.type === 'string') {
+      info.threadType = thread.type;
+    }
     // The transform sets these right after parsing; paths that never parse
     // (compress=false) forward the original body, so derive them from it.
     if (!info.clientSessionSha8) {
       const sid = clientSessionId(req.metadata);
       if (sid) info.clientSessionSha8 = await sha8(sid);
+    }
+    if (info.threadType === 'continue') {
+      // Server-side thread continuation: the body is only the delta (new
+      // tool_result + user turn), the history lives upstream. Nothing here to
+      // compare, and it must never become the reference for a full request.
+      info.prefixDiverge = 'thread';
+      info.prefixMsgs = (req.messages as unknown[]).length;
+      info.prefixMs = Math.round((performance.now() - t0) * 10) / 10;
+      return;
     }
     let { prefixKey: key, prefixOpenKey: openKey } = info;
     if (!key || !openKey) ({ key, openKey } = await prefixConversationKeys(req as never));
