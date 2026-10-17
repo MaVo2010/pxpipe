@@ -167,6 +167,8 @@ export interface TrackEvent {
   prefix_diverge?: string;
   prefix_msgs?: number;
   prefix_prev_msgs?: number;
+  /** Longest recent request of the conversation fully contained in this one (reusable part). */
+  prefix_reuse_msgs?: number;
   prefix_ms?: number;
 
   // From Anthropic/OpenAI Usage:
@@ -377,6 +379,7 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.prefixDiverge) out.prefix_diverge = info.prefixDiverge;
     if (info.prefixMsgs !== undefined) out.prefix_msgs = info.prefixMsgs;
     if (info.prefixPrevMsgs !== undefined) out.prefix_prev_msgs = info.prefixPrevMsgs;
+    if (info.prefixReuseMsgs !== undefined) out.prefix_reuse_msgs = info.prefixReuseMsgs;
     if (info.prefixMs !== undefined) out.prefix_ms = info.prefixMs;
     if (info.baselineTokens !== undefined && info.baselineTokens > 0) {
       out.baseline_tokens = info.baselineTokens;

@@ -345,9 +345,9 @@ Environment:
                           chunks are byte-identical across turns, so
                           re-rendering them is wasted CPU; 0 disables the cache.
                           Live counters at /proxy-stats under render_cache.
-  PXPIPE_PREFIX_TELEMETRY  set to 0 to stop logging prefix_diverge/prefix_msgs/
-                          prefix_ms (first outgoing difference to the previous
-                          request of the same conversation). On by default.
+  PXPIPE_PREFIX_TELEMETRY  set to 0 to stop logging the prefix_* fields (first
+                          outgoing difference to the recent requests of the same
+                          conversation, reusable prefix). On by default.
   PXPIPE_DEBUG_CAPTURE_4XX  debug: set to 1 to persist full 4xx request and
                           upstream error bodies (prompts + any secrets in
                           context) to disk. Off by default.

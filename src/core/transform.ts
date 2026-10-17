@@ -720,6 +720,14 @@ export interface TransformInfo {
   prefixMsgs?: number;
   /** Message count of the previous request it was compared with (unset when 'new'). */
   prefixPrevMsgs?: number;
+  /** Longest recent request of the conversation that this one fully contains
+   *  (tools, system, head equal; its messages a prefix of ours): the reusable part.
+   *  0 when none is, unset when 'new'. */
+  prefixReuseMsgs?: number;
+  /** Conversation keys for the host's divergence state (prefixConversationKeys).
+   *  Internal; not persisted. */
+  prefixKey?: string;
+  prefixOpenKey?: string;
   /** Host CPU time spent on the divergence fingerprint, ms. */
   prefixMs?: number;
   /** Raw bytes of the first rendered image. Dashboard preview only; NOT persisted to JSONL. */
@@ -1514,6 +1522,23 @@ export function firstReplyText(req: MessagesRequest): string {
 }
 
 /**
+ * Conversation keys for prefix-divergence telemetry, from the ORIGINAL request
+ * (the outgoing one may have its opening rewritten into the slab). `key` = first
+ * user text + first reply + model, which separates conversations that open alike
+ * (siblings get different tool_use ids); `openKey` = the same without the reply,
+ * which is all turn 1 has — the host moves the turn-1 entry over on turn 2.
+ */
+export async function prefixConversationKeys(
+  req: MessagesRequest,
+): Promise<{ key: string; openKey: string }> {
+  const user = firstUserText(req);
+  const model = req.model ?? '';
+  const openKey = await sha8(`${user}\u0000\u0000${model}`);
+  const reply = firstReplyText(req);
+  return { key: reply ? await sha8(`${user}\u0000${reply}\u0000${model}`) : openKey, openKey };
+}
+
+/**
  * True when the first message carries a `<system-reminder>` block — the
  * envelope Claude Code uses to inject CLAUDE.md project instructions. Such a
  * message must never be rendered to pixels: imaged rules read as description
@@ -2289,9 +2314,15 @@ export async function transformRequest(
     return { body, info };
   }
 
-  // Client session key first, so every early exit below still carries it.
+  // Client session and conversation keys first, so every early exit below still
+  // carries them (prefix telemetry keys on them; never mutates the request).
   const clientSession = clientSessionId((req as { metadata?: unknown }).metadata);
   if (clientSession) info.clientSessionSha8 = await sha8(clientSession);
+  {
+    const keys = await prefixConversationKeys(req);
+    info.prefixKey = keys.key;
+    info.prefixOpenKey = keys.openKey;
+  }
 
   // Price the caller's OWN images before we rewrite anything: they occupy the
   // same wire cap we are about to spend from. Counted once, here, because every

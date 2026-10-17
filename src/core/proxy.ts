@@ -66,9 +66,14 @@ export interface ProxyConfig {
    *  body. Off by default because either side may contain prompts or secrets. */
   captureErrorReqBody?: boolean;
   /** Host hook, called once per Anthropic Messages request after the response,
-   *  with the exact outgoing body. May fill the prefix* fields of `info`
+   *  with the exact outgoing body, the final status and the forwarded
+   *  `anthropic-beta` header. May fill the prefix* fields of `info`
    *  (see src/prefix-telemetry.ts). Errors are swallowed. */
-  prefixTelemetry?: (body: Uint8Array, info: TransformInfo) => void | Promise<void>;
+  prefixTelemetry?: (
+    body: Uint8Array,
+    info: TransformInfo,
+    ctx: { status: number; beta: string | null },
+  ) => void | Promise<void>;
   /** Abort the upstream request if response headers have not arrived within this
    *  many ms. Cleared once headers land, so long generations are unaffected.
    *  0 disables. */
@@ -1592,7 +1597,10 @@ let responseContentType: string | undefined;
           && isMessages && !isGoogle && !bridgedGptMessages && !bridgedChatMessages
         ) {
           try {
-            await config.prefixTelemetry(reqBodyBytes, info);
+            await config.prefixTelemetry(reqBodyBytes, info, {
+              status,
+              beta: req.headers.get('anthropic-beta'),
+            });
           } catch {
             // Telemetry must never cost the event row.
           }
