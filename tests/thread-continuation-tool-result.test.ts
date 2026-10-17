@@ -68,6 +68,18 @@ describe('tool_result imaging below the slab gate', () => {
     expect(out.messages[1]).toEqual(req.messages[1]);
   });
 
+  it('leaves a large delta byte-identical when tool_result imaging is off (production setting)', async () => {
+    // pxpipe.service runs PXPIPE_COMPRESS_TOOL_RESULTS=0; the early exits now reach
+    // tool_result imaging, so the switch must hold there too, not only on the main path.
+    for (const historyMinTokens of [undefined, 100_000]) {
+      const bytes = enc(continuation(fileBody(1500)));
+      const { body, info } = await transformRequest(bytes, { compressToolResults: false, historyMinTokens });
+      expect(info.compressed).toBe(false);
+      expect(info.toolResultImgs ?? 0).toBe(0);
+      expect(new TextDecoder().decode(body)).toBe(new TextDecoder().decode(bytes));
+    }
+  });
+
   it('still passes a small tool_result through byte-identical', async () => {
     const bytes = enc(continuation('a.txt  6B\nb.txt  6B'));
     const { body, info } = await transformRequest(bytes);
