@@ -456,17 +456,36 @@ function compactPreview(text: string): string {
 // this cap; beyond it, head+tail elision keeps both the setup AND the trailing output
 // format, which real prompts put at the end.
 const LATEST_COLLAPSED_USER_VERBATIM_CHARS = 4000;
-const VERBATIM_HEAD_CHARS = 2600;
-const VERBATIM_TAIL_CHARS = 1400;
+const VERBATIM_HEAD_SHARE = 0.65; // 2600 of 4000 at the default cap
+
+/**
+ * PXPIPE_OPENING_VERBATIM_CHARS raises the verbatim cap for a long opening task
+ * contract. Fork finding 2026-10-19: a 7 100-char operator prompt whose "no
+ * rollout without operator go" lived in the elided middle was lost after the
+ * first cold rebuild, and the model rolled out. Unset / invalid / below the
+ * default = upstream behaviour (4000, head 2600 + tail 1400), byte-identical.
+ */
+export function openingVerbatimCap(): number {
+  const raw = process.env.PXPIPE_OPENING_VERBATIM_CHARS?.trim();
+  if (!raw) return LATEST_COLLAPSED_USER_VERBATIM_CHARS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < LATEST_COLLAPSED_USER_VERBATIM_CHARS) {
+    return LATEST_COLLAPSED_USER_VERBATIM_CHARS;
+  }
+  return Math.floor(n);
+}
 
 function verbatimTaskText(text: string): string {
   const t = text.trim();
-  if (t.length <= LATEST_COLLAPSED_USER_VERBATIM_CHARS) return t;
-  const elided = t.length - VERBATIM_HEAD_CHARS - VERBATIM_TAIL_CHARS;
+  const cap = openingVerbatimCap();
+  if (t.length <= cap) return t;
+  const head = Math.round(cap * VERBATIM_HEAD_SHARE);
+  const tail = cap - head;
+  const elided = t.length - head - tail;
   return (
-    t.slice(0, VERBATIM_HEAD_CHARS) +
+    t.slice(0, head) +
     `\n[… middle elided (${elided} chars) …]\n` +
-    t.slice(t.length - VERBATIM_TAIL_CHARS)
+    t.slice(t.length - tail)
   );
 }
 

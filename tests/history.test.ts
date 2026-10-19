@@ -15,7 +15,7 @@
  *     enough turns to fire, off when no closed prefix exists.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   findClosedPrefixBoundary,
   blocksToText,
@@ -23,6 +23,7 @@ import {
   messagesToHistoryText,
   collapseHistory,
   HISTORY_DEFAULTS,
+  openingVerbatimCap,
 } from '../src/core/history.js';
 import { transformRequest, isCompressionProfitable } from '../src/core/transform.js';
 import { DENSE_CONTENT_CHARS_PER_IMAGE } from '../src/core/render.js';
@@ -1294,6 +1295,79 @@ describe('collapseHistory — opening task carried verbatim from the demoted hea
     expect(pointer.text).toContain('middle elided');
     expect(pointer.text).toContain('SETUP: '); // head kept
     expect(pointer.text).toContain('Reply as: balance=<n>, count=<m>, final=<n+m>.'); // tail kept
+  });
+
+  // Fork 2026-10-19: a rule that sits only in the elided middle of a long opening
+  // contract is gone after the first cold rebuild. PXPIPE_OPENING_VERBATIM_CHARS
+  // raises the cap; unset or below the default stays byte-identical to upstream.
+  describe('PXPIPE_OPENING_VERBATIM_CHARS (fork)', () => {
+    const MIDDLE_RULE = 'Step 0.5: Opus review, then OPERATOR GO before any rollout.';
+    // 2600 head + 1400 tail = 4000; a 7 100-char contract with the rule at ~3 500.
+    const contract =
+      'SETUP: ' + 'a'.repeat(3400) + ' ' + MIDDLE_RULE + ' ' + 'b'.repeat(3000) +
+      ' Reply as: balance=<n>, count=<m>, final=<n+m>.';
+
+    async function pointerFor(): Promise<string> {
+      const msgs: Message[] = [usr([{ type: 'text', text: contract }])];
+      for (let i = 1; i <= 12; i++) {
+        msgs.push(
+          i % 2 === 1
+            ? asst(`turn ${i}: ` + 'x'.repeat(2800))
+            : usr([{ type: 'text', text: `<system-reminder>nudge ${i} ` + 'x'.repeat(2800) + '</system-reminder>' }]),
+        );
+      }
+      msgs.push(usr('LIVE: answer now.'));
+      const { messages: out } = await collapseHistory(msgs, isCompressionProfitable, {
+        keepTail: 1,
+        minCollapsePrefix: 5,
+        cols: 100,
+        collapseChunk: 0,
+        protectedPrefix: 1,
+      });
+      const synthText = (out[1]!.content as Array<Record<string, unknown>>).filter(
+        (c) => c.type === 'text',
+      ) as Array<{ text: string }>;
+      return synthText.find((t) => t.text.includes('Most recent collapsed user turn'))!.text;
+    }
+
+    const saved = process.env.PXPIPE_OPENING_VERBATIM_CHARS;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.PXPIPE_OPENING_VERBATIM_CHARS;
+      else process.env.PXPIPE_OPENING_VERBATIM_CHARS = saved;
+    });
+
+    it('unset: the middle rule is elided (upstream behaviour, documents the loss)', async () => {
+      delete process.env.PXPIPE_OPENING_VERBATIM_CHARS;
+      expect(openingVerbatimCap()).toBe(4000);
+      const text = await pointerFor();
+      expect(text).toContain(`middle elided (${contract.length - 4000} chars)`);
+      expect(text).not.toContain(MIDDLE_RULE);
+    });
+
+    it('10000: the whole contract rides verbatim, nothing elided', async () => {
+      process.env.PXPIPE_OPENING_VERBATIM_CHARS = '10000';
+      expect(openingVerbatimCap()).toBe(10000);
+      const text = await pointerFor();
+      expect(text).not.toContain('middle elided');
+      expect(text).toContain(MIDDLE_RULE);
+      expect(text).toContain('Reply as: balance=<n>, count=<m>, final=<n+m>.');
+    });
+
+    it('6000: head/tail keep the 65/35 split (3900 + 2100) and still elide', async () => {
+      process.env.PXPIPE_OPENING_VERBATIM_CHARS = '6000';
+      const text = await pointerFor();
+      expect(text).toContain(`middle elided (${contract.length - 6000} chars)`);
+      expect(text).toContain(MIDDLE_RULE); // ends at ~3 470 < 3 900 head
+    });
+
+    it('invalid or below the default falls back to 4000', () => {
+      process.env.PXPIPE_OPENING_VERBATIM_CHARS = 'abc';
+      expect(openingVerbatimCap()).toBe(4000);
+      process.env.PXPIPE_OPENING_VERBATIM_CHARS = '1000';
+      expect(openingVerbatimCap()).toBe(4000);
+      process.env.PXPIPE_OPENING_VERBATIM_CHARS = '0';
+      expect(openingVerbatimCap()).toBe(4000);
+    });
   });
 });
 

@@ -6,6 +6,13 @@ behavioral changes, patch = fixes).
 
 ## Unreleased
 
+### Added (fork)
+- **`PXPIPE_OPENING_VERBATIM_CHARS` raises the verbatim cap of a demoted opening
+  task.** Finding 2026-10-19: a 7 100-char operator contract lost "Opus review,
+  then operator go before rollout" to the elided middle (2600 head + 1400 tail)
+  on the first cold thread rebuild, and the model rolled out. Unset or below
+  4000 is byte-identical to upstream; at 10000 the whole contract rides verbatim.
+
 ### Fixed
 - **A history too heavy for the byte budget is collapsed in part instead of not
   at all.** The collapse was admitted atomically: rendered whole, weighed, and

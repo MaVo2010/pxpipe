@@ -339,6 +339,11 @@ Environment:
                           liveness) survive a restart; 0/off disables
                           (default ~/.pxpipe/session-state.json). Without it a
                           restart drops every live session's floor.
+  PXPIPE_OPENING_VERBATIM_CHARS
+                          verbatim cap (chars) for a long opening task when the
+                          protected head is demoted on collapse; default 4000
+                          (head 2600 + tail 1400, middle elided). Raise it so an
+                          operator contract keeps every rule after a cold rebuild.
   PXPIPE_DUMP_DIR         debug: write every rendered PNG here (what the model
                           sees); off unless set. Compress arm only.
   PXPIPE_RENDER_CACHE_BYTES  max bytes of rendered pages to keep in memory
