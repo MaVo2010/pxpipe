@@ -352,13 +352,15 @@ function imageTokensCost(
   return imageTokensForRows(rows, effectiveCols, imageCountCap, maxCharsPerImage, geometry);
 }
 
-/** Gate geometry for collapsed history.
+/** The model's READABLE geometry: collapsed history, over-cap user turns and
+ *  tool_result pages (since 2026-10-19) all render here; only the static slab
+ *  stays at {@link denseGateGeometry}.
  *
- *  Identical to {@link denseGateGeometry} unless the model profile sets
- *  `historyStripCols` / `historyStyle`, which let a deployment render history
- *  at a lower density than the slab without touching either default. Both are
- *  undefined in every shipped profile, so this returns the dense geometry
- *  unchanged out of the box. */
+ *  Identical to the dense geometry unless the model profile sets
+ *  `historyStripCols` / `historyStyle`. Shipped profiles: Fable sets neither
+ *  (dense, byte-identical); Opus/Sonnet/Haiku ship `historyStyle` = spaced
+ *  5x8 (`cellHBonus: 2`, 10 px rows), so for them this is spaced out of the
+ *  box and an env profile (`PXPIPE_GPT_PROFILES`) can raise it further. */
 function historyGateGeometry(
   o?: Required<TransformOptions>,
   callerOverrodeCols: boolean = false,
@@ -2148,12 +2150,21 @@ function historyGridTuning(
  * on a first-party host sends server-side thread continuations whose body is only
  * the delta (no tools, system = billing line), so this is where its tool_results live.
  * Must run AFTER history collapse; see the ORDERING INVARIANT at the main-path call.
+ *
+ * `geo` is the model's READABLE geometry ({@link historyGateGeometry}), not the
+ * dense slab geometry: a tool_result is where the exact values live (hashes,
+ * line numbers, amounts). Blinded 26-value battery at dense 312/spleen-5x8,
+ * 2026-10-19: Fable 5.1 2/26 exact with 15 silent substitutions, Opus 5.5 0/26.
+ * Same battery at the profile geometry: Opus 5.5 (jb-12/195) 100/100, Fable 5.1
+ * (jb-14/172) 74/100 with zero silent errors. Gate, paging and render all use
+ * `geo.cols`, so the page plan matches what is drawn. Without a history profile
+ * `geo` IS the dense geometry and the output is unchanged.
  */
 async function compressToolResultsInPlace(
   req: MessagesRequest,
   info: TransformInfo,
   o: Required<TransformOptions>,
-  denseGeo: ReturnType<typeof denseGateGeometry>,
+  geo: GateGeometry,
   droppedCodepoints: Map<number, number>,
 ): Promise<boolean> {
   let anyChanged = false;
@@ -2194,7 +2205,7 @@ async function compressToolResultsInPlace(
             if (innerR.length < o.minToolResultChars) {
               bumpPassthrough(info, 'below_threshold');
               rewritten.push(blk);
-            } else if (!isCompressionProfitable(innerR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo)) {
+            } else if (!isCompressionProfitable(innerR, geo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, geo.maxChars, geo)) {
               bumpPassthrough(info, 'not_profitable');
               rewritten.push(blk);
             } else {
@@ -2205,13 +2216,13 @@ async function compressToolResultsInPlace(
               const resultImageCap = Math.min(o.maxImagesPerToolResult, imageHeadroom(info));
               const linesPerImage = Math.max(
                 1,
-                Math.floor((denseGeo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(denseGeo.style)),
+                Math.floor((geo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(geo.style)),
               );
               const paged = truncateForBudget(
                 innerR,
                 resultImageCap,
-                denseGeo.cols,
-                denseGeo.maxChars,
+                geo.cols,
+                geo.maxChars,
                 linesPerImage,
               );
               if (paged.truncated) {
@@ -2221,15 +2232,14 @@ async function compressToolResultsInPlace(
               const { blocks: imgs, pngs: rawPngs, dims: rawDims, droppedChars, droppedCodepoints: dcp, pixels } =
                 await textToImageBlocks(
                   paged.text,
-                  o.cols,
+                  geo.cols,
                   true,
-                  denseGeo.style,
-                  denseGeo.maxHeightPx,
+                  geo.style,
+                  geo.maxHeightPx,
                 );
-              // Paging is budgeted at denseGeo.cols but rendering happens at
-              // o.cols; when they differ the real page count can exceed the plan.
-              // Verify against the actual render and drop OUR images rather than
-              // ship a request the provider rejects outright.
+              // Paging and rendering both use geo.cols; shrink-to-content can
+              // still narrow a page. Verify against the actual render and drop
+              // OUR images rather than ship a request the provider rejects outright.
               // Atomic admission: this tool_result is one semantic group. It
               // is imaged whole or kept as text whole, by count and by weight
               // alike. A half-imaged result would ship pages without the text
@@ -2308,21 +2318,21 @@ async function compressToolResultsInPlace(
                 newInner.push(ib as TextBlock | ImageBlock);
                 continue;
               }
-              if (!isCompressionProfitable(innerTextR, denseGeo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, denseGeo.maxChars, denseGeo)) {
+              if (!isCompressionProfitable(innerTextR, geo.cols, o.maxImagesPerToolResult, o.charsPerToken, 0, 0, true, geo.maxChars, geo)) {
                 bumpPassthrough(info, 'not_profitable');
                 newInner.push(ib as TextBlock | ImageBlock);
                 continue;
               }
               const linesPerImage = Math.max(
                 1,
-                Math.floor((denseGeo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(denseGeo.style)),
+                Math.floor((geo.maxHeightPx - 2 * PAD_Y) / renderCellHeight(geo.style)),
               );
               const resultImageCap = Math.min(o.maxImagesPerToolResult, imageHeadroom(info));
               const paged = truncateForBudget(
                 innerTextR,
                 resultImageCap,
-                denseGeo.cols,
-                denseGeo.maxChars,
+                geo.cols,
+                geo.maxChars,
                 linesPerImage,
               );
               if (paged.truncated) {
@@ -2332,15 +2342,14 @@ async function compressToolResultsInPlace(
               const { blocks: imgs, pngs: rawPngs, dims: rawDims, droppedChars, droppedCodepoints: dcp, pixels } =
                 await textToImageBlocks(
                   paged.text,
-                  o.cols,
+                  geo.cols,
                   true,
-                  denseGeo.style,
-                  denseGeo.maxHeightPx,
+                  geo.style,
+                  geo.maxHeightPx,
                 );
-              // Paging is budgeted at denseGeo.cols but rendering happens at
-              // o.cols; when they differ the real page count can exceed the plan.
-              // Verify against the actual render and drop OUR images rather than
-              // ship a request the provider rejects outright.
+              // Paging and rendering both use geo.cols; shrink-to-content can
+              // still narrow a page. Verify against the actual render and drop
+              // OUR images rather than ship a request the provider rejects outright.
               const partBytes = imgs.reduce((sum, img) => sum + approxBlockBytes(img), 0);
               if (imgs.length > imageHeadroom(info)) {
                 bumpPassthrough(info, 'image_budget');
@@ -2514,7 +2523,7 @@ async function runHistoryCollapseAndFinalize(
   // tiny system with a large tool_result (e.g. a server-side thread continuation)
   // is exactly the request that needs it. After the collapse, per the invariant.
   const toolResultsImaged = o.compressToolResults
-    ? await compressToolResultsInPlace(req, info, o, denseGateGeometry(o), droppedCodepoints)
+    ? await compressToolResultsInPlace(req, info, o, historyGateGeometry(o, opts.cols !== undefined), droppedCodepoints)
     : false;
   applyPins(req, info, pins);
   info.outgoingTextChars = countOutgoingTextChars(req);
@@ -3163,7 +3172,7 @@ export async function transformRequest(
   // history images are already counted in `info` by the time we get here, so
   // `imageHeadroom(info)` is the headroom left after the collapse spent its
   // share. Out of headroom degrades to sharp text, which is the safe direction.
-  await compressToolResultsInPlace(req, info, o, denseGeo, droppedCodepoints);
+  await compressToolResultsInPlace(req, info, o, historyGateGeometry(o, opts.cols !== undefined), droppedCodepoints);
 
   // The volatile billing line is NOT re-emitted into the body at all. There is
   // no safe body position: req.system precedes the last cache_control marker

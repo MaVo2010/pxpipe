@@ -13,7 +13,7 @@
 
 import type { CacheControl, ContentBlock, ImageBlock, Message, TextBlock, ToolUseBlock, ToolResultBlock } from './types.js';
 import type { RenderedImage } from './render.js';
-import { DENSE_CONTENT_CHARS_PER_IMAGE, DENSE_CONTENT_COLS, maxCharsPerImage, DENSE_RENDER_STYLE, MAX_HEIGHT_PX, neutralizeSentinel, reflow, renderTextToPngsWithCharLimit, roleSlotSegment, SLOT_MARK_ASSISTANT, SLOT_MARK_USER, type RenderStyle } from './render.js';
+import { DENSE_CONTENT_CHARS_PER_IMAGE, maxCharsPerImage, DENSE_RENDER_STYLE, MAX_HEIGHT_PX, neutralizeSentinel, reflow, renderTextToPngsWithCharLimit, roleSlotSegment, SLOT_MARK_ASSISTANT, SLOT_MARK_USER, type RenderStyle } from './render.js';
 import { factSheetText } from './factsheet.js';
 import { bytesToBase64 } from './png.js';
 
@@ -696,6 +696,11 @@ async function userTurnBlocks(
   /** Receives each image with the block it goes out in. The block's `data` is
    *  left empty: the caller encodes once it knows the chunk is sent. */
   onImage: (img: RenderedImage, block: ImageBlock) => void,
+  /** The model's readable geometry, the same one the transcript pages use. A
+   *  pasted document is exactly where verbatim values live (a startprompt's
+   *  hashes, paths, limits); until 2026-10-19 it was hard-wired to the dense
+   *  312/spleen-5x8 page the blinded battery showed Fable 5.1 misreads 15/26. */
+  geometry: { cols: number; style: RenderStyle; maxHeightPx: number },
 ): Promise<ContentBlock[]> {
   const out: ContentBlock[] = [];
   let pending: string[] = [];
@@ -703,8 +708,9 @@ async function userTurnBlocks(
   // One image per pasted document would put a floor of ≥1 image on every such turn
   // that no grid coarsening can lift: a session with 175 pasted logs rendered 175
   // near-empty images and blew the 100-image cap (#161), which upstream answers with
-  // a 500 rather than a usable error. Batching packs them at ~28k chars/image and
-  // makes the count a function of BYTES, which the freeze grid can actually control.
+  // a 500 rather than a usable error. Batching packs them by page (the char cap of
+  // ~28k is the dense ceiling; at the profile geometry the page height binds first)
+  // and makes the count a function of BYTES, which the freeze grid can actually control.
   // Within a chunk the order is fixed and the chunk is frozen once closed, so the
   // grouped bytes are as stable as the transcript image next to them.
   const imaged: { idx: number; typed: string }[] = [];
@@ -748,9 +754,10 @@ async function userTurnBlocks(
     });
     const imgs = await renderTextToPngsWithCharLimit(
       imaged.map((u) => `<user t="${u.idx}">\n${u.typed}\n</user>`).join('\n\n'),
-      DENSE_CONTENT_COLS,
+      geometry.cols,
       DENSE_CONTENT_CHARS_PER_IMAGE,
-      DENSE_RENDER_STYLE,
+      geometry.style,
+      geometry.maxHeightPx,
     );
     for (const img of imgs) {
       const block: ImageBlock = {
@@ -1054,7 +1061,7 @@ export async function collapseHistory(
     }
     // This chunk's user prompts, as text, immediately after the image they were
     // pulled out of — attribution stays local and the ordering matches the render.
-    blocks.push(...(await userTurnBlocks(messages, start, end, onImage)));
+    blocks.push(...(await userTurnBlocks(messages, start, end, onImage, { cols: o.cols, style: o.style, maxHeightPx: o.maxHeightPx })));
     let bytes = 0;
     for (const img of images) bytes += img.png.length;
     return { start, end, blocks, images, imageBlocks, bytes, transcriptImages };
