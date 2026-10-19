@@ -464,7 +464,12 @@ const VERBATIM_HEAD_SHARE = 0.65; // 2600 of 4000 at the default cap
  * rollout without operator go" lived in the elided middle was lost after the
  * first cold rebuild, and the model rolled out. Unset / invalid / below the
  * default = upstream behaviour (4000, head 2600 + tail 1400), byte-identical.
+ * The cap governs both copies of the task: the tomb in the demoted head and the
+ * pointer in the synthetic message, so the context carries up to 2 x cap chars.
+ * Clamped at 50000.
  */
+const OPENING_VERBATIM_MAX_CHARS = 50000; // review S2: the text rides twice (tomb + pointer)
+
 export function openingVerbatimCap(): number {
   const raw = process.env.PXPIPE_OPENING_VERBATIM_CHARS?.trim();
   if (!raw) return LATEST_COLLAPSED_USER_VERBATIM_CHARS;
@@ -472,7 +477,7 @@ export function openingVerbatimCap(): number {
   if (!Number.isFinite(n) || n < LATEST_COLLAPSED_USER_VERBATIM_CHARS) {
     return LATEST_COLLAPSED_USER_VERBATIM_CHARS;
   }
-  return Math.floor(n);
+  return Math.min(Math.floor(n), OPENING_VERBATIM_MAX_CHARS);
 }
 
 function verbatimTaskText(text: string): string {

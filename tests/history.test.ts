@@ -1266,6 +1266,7 @@ describe('collapseHistory — opening task carried verbatim from the demoted hea
   });
 
   it('elides the middle, never the tail, when the typed task exceeds the verbatim cap', async () => {
+    delete process.env.PXPIPE_OPENING_VERBATIM_CHARS; // fork: an outer env must not raise the cap here
     const longTask =
       'SETUP: ' + 'a'.repeat(6000) + ' Reply as: balance=<n>, count=<m>, final=<n+m>.';
     const msgs: Message[] = [
@@ -1302,12 +1303,13 @@ describe('collapseHistory — opening task carried verbatim from the demoted hea
   // raises the cap; unset or below the default stays byte-identical to upstream.
   describe('PXPIPE_OPENING_VERBATIM_CHARS (fork)', () => {
     const MIDDLE_RULE = 'Step 0.5: Opus review, then OPERATOR GO before any rollout.';
-    // 2600 head + 1400 tail = 4000; a 7 100-char contract with the rule at ~3 500.
+    // 2600 head + 1400 tail = 4000; a 6 515-char contract, the rule at 3 408-3 467:
+    // inside the elided middle at 4000 (2600..5115), inside the head at 6000 (3900).
     const contract =
       'SETUP: ' + 'a'.repeat(3400) + ' ' + MIDDLE_RULE + ' ' + 'b'.repeat(3000) +
       ' Reply as: balance=<n>, count=<m>, final=<n+m>.';
 
-    async function pointerFor(): Promise<string> {
+    async function carriedFor(): Promise<{ pointer: string; tomb: string }> {
       const msgs: Message[] = [usr([{ type: 'text', text: contract }])];
       for (let i = 1; i <= 12; i++) {
         msgs.push(
@@ -1327,7 +1329,13 @@ describe('collapseHistory — opening task carried verbatim from the demoted hea
       const synthText = (out[1]!.content as Array<Record<string, unknown>>).filter(
         (c) => c.type === 'text',
       ) as Array<{ text: string }>;
-      return synthText.find((t) => t.text.includes('Most recent collapsed user turn'))!.text;
+      const headText = (out[0]!.content as Array<Record<string, unknown>>).filter(
+        (c) => c.type === 'text',
+      ) as Array<{ text: string }>;
+      return {
+        pointer: synthText.find((t) => t.text.includes('Most recent collapsed user turn'))!.text,
+        tomb: headText.find((t) => t.text.includes('PRIOR CONTEXT ONLY'))!.text,
+      };
     }
 
     const saved = process.env.PXPIPE_OPENING_VERBATIM_CHARS;
@@ -1339,25 +1347,29 @@ describe('collapseHistory — opening task carried verbatim from the demoted hea
     it('unset: the middle rule is elided (upstream behaviour, documents the loss)', async () => {
       delete process.env.PXPIPE_OPENING_VERBATIM_CHARS;
       expect(openingVerbatimCap()).toBe(4000);
-      const text = await pointerFor();
-      expect(text).toContain(`middle elided (${contract.length - 4000} chars)`);
-      expect(text).not.toContain(MIDDLE_RULE);
+      const { pointer, tomb } = await carriedFor();
+      expect(pointer).toContain(`middle elided (${contract.length - 4000} chars)`);
+      expect(pointer).not.toContain(MIDDLE_RULE);
+      expect(tomb).not.toContain(MIDDLE_RULE); // the head copy loses it too
     });
 
     it('10000: the whole contract rides verbatim, nothing elided', async () => {
       process.env.PXPIPE_OPENING_VERBATIM_CHARS = '10000';
       expect(openingVerbatimCap()).toBe(10000);
-      const text = await pointerFor();
-      expect(text).not.toContain('middle elided');
-      expect(text).toContain(MIDDLE_RULE);
-      expect(text).toContain('Reply as: balance=<n>, count=<m>, final=<n+m>.');
+      const { pointer, tomb } = await carriedFor();
+      expect(pointer).not.toContain('middle elided');
+      expect(pointer).toContain(MIDDLE_RULE);
+      expect(pointer).toContain('Reply as: balance=<n>, count=<m>, final=<n+m>.');
+      // Both copies grow with the cap (review S1): the demoted-head tomb too.
+      expect(tomb).not.toContain('middle elided');
+      expect(tomb).toContain(MIDDLE_RULE);
     });
 
     it('6000: head/tail keep the 65/35 split (3900 + 2100) and still elide', async () => {
       process.env.PXPIPE_OPENING_VERBATIM_CHARS = '6000';
-      const text = await pointerFor();
-      expect(text).toContain(`middle elided (${contract.length - 6000} chars)`);
-      expect(text).toContain(MIDDLE_RULE); // ends at ~3 470 < 3 900 head
+      const { pointer } = await carriedFor();
+      expect(pointer).toContain(`middle elided (${contract.length - 6000} chars)`);
+      expect(pointer).toContain(MIDDLE_RULE); // ends at 3 467 < 3 900 head
     });
 
     it('invalid or below the default falls back to 4000', () => {
@@ -1367,6 +1379,10 @@ describe('collapseHistory — opening task carried verbatim from the demoted hea
       expect(openingVerbatimCap()).toBe(4000);
       process.env.PXPIPE_OPENING_VERBATIM_CHARS = '0';
       expect(openingVerbatimCap()).toBe(4000);
+      process.env.PXPIPE_OPENING_VERBATIM_CHARS = '4000';
+      expect(openingVerbatimCap()).toBe(4000);
+      process.env.PXPIPE_OPENING_VERBATIM_CHARS = '1e9'; // review S2: clamped
+      expect(openingVerbatimCap()).toBe(50000);
     });
   });
 });
