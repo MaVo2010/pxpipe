@@ -504,12 +504,90 @@ describe('transformGoogleGenerateContent', () => {
     '42',
     JSON.stringify({ systemInstruction: { parts: 'bad' } }),
     JSON.stringify({ systemInstruction: { parts: [null] } }),
+    // A null element inside a contents turn's parts must not throw in
+    // planGoogleHistory's user-turn scan — it passes through like any other
+    // malformed shape rather than 502-ing the request.
+    JSON.stringify({ contents: [{ role: 'user', parts: [null] }] }),
     JSON.stringify({ systemInstruction: { parts: [{ text: 'x'.repeat(10000) }] }, contents: 'bad' }),
   ])('passes unsupported request shape through unchanged: %s', async (raw) => {
     const bytes = new TextEncoder().encode(raw);
     const result = await transformGoogleGenerateContent(bytes, 'gemini-3.6-flash', { compress: true });
     expect(new TextDecoder().decode(result.body)).toBe(raw);
     expect(result.info.compressed).toBe(false);
+  });
+
+  it('packs long Gemini 4 sessions into full pages and drops historical thought blocks', async () => {
+    const contents: Array<Record<string, unknown>> = [
+      { role: 'user', parts: [{ text: 'LIVE TASK: complete the multi-hundred-turn refactor.' }] },
+    ];
+    for (let i = 0; i < 150; i++) {
+      contents.push({
+        role: 'model',
+        parts: [
+          { thought: true, text: `internal reasoning trace ${i} `.repeat(40), thoughtSignature: `thought-sig-${i}` },
+          { functionCall: { name: 'bash', args: { command: `echo step-${i}` } }, thoughtSignature: `call-sig-${i}` },
+        ],
+      });
+      contents.push({
+        role: 'user',
+        parts: [{
+          functionResponse: {
+            name: 'bash',
+            response: { output: `step-output-${i} `.repeat(60) },
+          },
+        }],
+      });
+    }
+    const sampleBody = {
+      systemInstruction: { parts: [{ text: 'You are a coding agent. '.repeat(250) }] },
+      contents,
+    };
+    const result = await transformGoogleGenerateContent(
+      new TextEncoder().encode(JSON.stringify(sampleBody)),
+      'gemini-4-argon',
+      { compress: true },
+    );
+
+    expect(result.info.compressed).toBe(true);
+    expect(result.info.historyReason).toBe('collapsed');
+    // All 296 turns before keepTail=4 collapse (used to stall at 191 turns / 32 images).
+    expect(result.info.collapsedTurns).toBe(296);
+    expect(result.info.collapsedImages ?? 0).toBeLessThanOrEqual(16);
+    expect((result.info.imageSources ?? []).join('\n')).not.toContain('internal reasoning trace 0');
+  });
+
+  it('compresses large omp-shaped functionResponse.response.output payloads in the active tail', async () => {
+    const longOutput = Array.from(
+      { length: 900 },
+      (_, i) => `src/module-${i}.ts:${i + 1}: match ${i}`,
+    ).join('\n');
+    const sampleBody = {
+      systemInstruction: { parts: [{ text: 'You are a coding agent. '.repeat(250) }] },
+      contents: [
+        { role: 'user', parts: [{ text: 'Run grep.' }] },
+        { role: 'model', parts: [{ functionCall: { name: 'grep', args: { pattern: 'match' } } }] },
+        {
+          role: 'user',
+          parts: [{
+            functionResponse: {
+              name: 'grep',
+              response: { output: longOutput },
+            },
+          }],
+        },
+      ],
+    };
+    const result = await transformGoogleGenerateContent(
+      new TextEncoder().encode(JSON.stringify(sampleBody)),
+      'gemini-4-argon',
+      { compress: true, collapseHistory: false },
+    );
+
+    expect(result.info.toolResultImgs ?? 0).toBeGreaterThan(0);
+    const out = JSON.parse(new TextDecoder().decode(result.body));
+    const response = out.contents[2].parts[0].functionResponse;
+    expect(response.response.output).toContain('rendered in the attached image');
+    expect(response.parts[0].inlineData.mimeType).toBe('image/png');
   });
 
   describe('normalizeGoogleTurnRoles', () => {

@@ -20,6 +20,7 @@ import {
   X509Certificate,
   type KeyObject,
 } from 'node:crypto';
+import * as tls from 'node:tls';
 import { createSecureContext, type SecureContext } from 'node:tls';
 import { isIP } from 'node:net';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -165,8 +166,7 @@ function privateKeyPem(key: KeyObject): string {
  * `CURL_CA_BUNDLE` and `REQUESTS_CA_BUNDLE` REPLACE the trust store rather
  * than extend it, so a file holding only our CA would make every non-pxpipe
  * HTTPS call in the child fail verification (gcloud, gws, pip: #245). The
- * first path that exists wins; none found means the bundle is CA-only and the
- * caller is told so.
+ * first path that exists wins; none found falls back to {@link osStoreRoots}.
  */
 const SYSTEM_ROOT_BUNDLES = [
   '/etc/ssl/cert.pem', // macOS, Alpine, FreeBSD
@@ -185,6 +185,40 @@ export function findSystemRootBundle(candidates: readonly string[] = SYSTEM_ROOT
   return null;
 }
 
+export const OS_STORE = 'the OS certificate store';
+
+/**
+ * Windows keeps its roots in the certificate store, not in a file, so none of
+ * the paths above exist there. Node 22.15+/23.10+ can export that store as PEM;
+ * on older runtimes this returns '' and the bundle stays CA-only as before.
+ */
+export function osStoreRoots(): string {
+  const get = (tls as { getCACertificates?: (type: string) => string[] }).getCACertificates;
+  try {
+    return get ? get('system').join('\n') : '';
+  } catch {
+    return '';
+  }
+}
+
+/** The public roots to append to our CA, and where they came from (null: none). */
+export function readSystemRoots(
+  candidates: readonly string[] = SYSTEM_ROOT_BUNDLES,
+  osStore: () => string = osStoreRoots,
+): { pem: string; source: string | null } {
+  const path = findSystemRootBundle(candidates);
+  if (path) {
+    try {
+      const pem = readFileSync(path, 'utf8');
+      if (pem) return { pem, source: path };
+    } catch {
+      /* unreadable: try the OS store */
+    }
+  }
+  const pem = osStore();
+  return pem ? { pem, source: OS_STORE } : { pem: '', source: null };
+}
+
 export class CertificateAuthority {
   private readonly leaves = new Map<string, SecureContext>();
 
@@ -196,7 +230,7 @@ export class CertificateAuthority {
     readonly certPath: string,
     /** Our CA followed by the system roots; see {@link writeBundle}. */
     readonly bundlePath: string,
-    /** Null when no system root bundle was found and `bundlePath` is CA-only. */
+    /** Where the roots came from (a file path or {@link OS_STORE}); null when `bundlePath` is CA-only. */
     readonly systemRootsPath: string | null,
   ) {}
 
@@ -207,18 +241,10 @@ export class CertificateAuthority {
    */
   private static writeBundle(dir: string, certPem: string): { bundlePath: string; systemRootsPath: string | null } {
     const bundlePath = join(dir, 'warp-ca-bundle.pem');
-    const systemRootsPath = findSystemRootBundle();
-    let roots = '';
-    if (systemRootsPath) {
-      try {
-        roots = readFileSync(systemRootsPath, 'utf8');
-      } catch {
-        /* unreadable: fall back to CA-only, reported via systemRootsPath */
-      }
-    }
+    const { pem: roots, source } = readSystemRoots();
     const sep = roots && !roots.endsWith('\n') ? '\n' : '';
     writeFileSync(bundlePath, certPem + roots + sep, { mode: 0o644 });
-    return { bundlePath, systemRootsPath: roots ? systemRootsPath : null };
+    return { bundlePath, systemRootsPath: source };
   }
 
   /**

@@ -323,6 +323,10 @@ export function staleFreshnessHints(text: string): string {
  */
 export function blocksToText(content: string | ContentBlock[]): string {
   if (typeof content === 'string') return content;
+  // Untrusted bodies can carry a non-array content (e.g. `content: null`).
+  // Tolerate it like every sibling serializer/scanner here rather than letting
+  // `for...of` throw and 502 the whole request.
+  if (!Array.isArray(content)) return '';
   const parts: string[] = [];
   for (const blk of content) {
     if (!blk || typeof blk !== 'object') continue;
@@ -586,7 +590,13 @@ function demoteProtectedHeadText(head: Message[]): Message[] {
     // Standing instructions survive verbatim; only the stale request prose demotes.
     const demoteText = (text: string, cc?: CacheControl): ContentBlock[] | undefined => {
       const { reminders, rest } = splitStandingInstructions(text);
-      const preview = compactPreview(rest);
+      // A protected opening turn above the normal native-text budget is exactly
+      // where a long task contract lives. Keep its existing bounded head+tail
+      // representation instead of reducing the whole contract to 300 chars.
+      const preview =
+        rest.length > USER_TEXT_MAX_CHARS
+          ? verbatimTaskText(rest)
+          : compactPreview(rest);
       if (reminders.length === 0) return preview ? [tomb(preview, cc)] : undefined;
       const out: ContentBlock[] = reminders.map((r) => ({ type: 'text', text: r } as TextBlock));
       if (preview) out.push(tomb(preview));

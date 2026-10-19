@@ -10,7 +10,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CertificateAuthority, findSystemRootBundle } from '../src/warp/ca.js';
+import * as tls from 'node:tls';
+import { CertificateAuthority, findSystemRootBundle, OS_STORE, osStoreRoots, readSystemRoots } from '../src/warp/ca.js';
 
 const CERT_RE = /-----BEGIN CERTIFICATE-----/g;
 const count = (pem: string): number => (pem.match(CERT_RE) ?? []).length;
@@ -38,8 +39,9 @@ describe('warp CA bundle (#245)', () => {
     // Our CA comes first so a client that stops at the first match still trusts us.
     expect(bundle.startsWith(readFileSync(ca.certPath, 'utf8'))).toBe(true);
     if (ca.systemRootsPath) {
+      const roots = ca.systemRootsPath === OS_STORE ? osStoreRoots() : readFileSync(ca.systemRootsPath, 'utf8');
       expect(count(bundle)).toBeGreaterThan(1);
-      expect(count(bundle)).toBe(1 + count(readFileSync(ca.systemRootsPath, 'utf8')));
+      expect(count(bundle)).toBe(1 + count(roots));
     } else {
       expect(count(bundle)).toBe(1);
     }
@@ -70,6 +72,27 @@ describe('warp CA bundle (#245)', () => {
 
   it('falls back to CA-only and reports it when no system bundle exists', () => {
     delete process.env.SSL_CERT_FILE;
-    expect(findSystemRootBundle(['/nonexistent/a.pem', '/nonexistent/b.pem'])).toBeNull();
+    const none = ['/nonexistent/a.pem', '/nonexistent/b.pem'];
+    expect(findSystemRootBundle(none)).toBeNull();
+    expect(readSystemRoots(none, () => '')).toEqual({ pem: '', source: null });
   });
+
+  // Windows has no root bundle file, so every warp child there got a CA-only
+  // SSL_CERT_FILE and failed verification against any host pxpipe passes through.
+  it('falls back to the OS certificate store when no bundle file exists', () => {
+    delete process.env.SSL_CERT_FILE;
+    const store = readFileSync(CertificateAuthority.loadOrCreate(tmp()).certPath, 'utf8').repeat(2);
+    const roots = readSystemRoots(['/nonexistent/a.pem'], () => store);
+    expect(roots).toEqual({ pem: store, source: OS_STORE });
+  });
+
+  it.runIf(typeof (tls as { getCACertificates?: unknown }).getCACertificates === 'function')(
+    'never hands the child a CA-only bundle where Node can read the OS store',
+    () => {
+      delete process.env.SSL_CERT_FILE;
+      const ca = CertificateAuthority.loadOrCreate(tmp());
+      expect(ca.systemRootsPath).not.toBeNull();
+      expect(count(readFileSync(ca.bundlePath, 'utf8'))).toBeGreaterThan(1);
+    },
+  );
 });

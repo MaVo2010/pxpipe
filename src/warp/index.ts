@@ -177,7 +177,7 @@ export function createWarpRuntime(options: WarpRuntimeOptions): WarpRuntime {
     // them a 1-cert file strips the public roots from every other HTTPS client
     // in the session (gcloud, gws, pip all fail verification — #245). They get
     // the bundle: our CA followed by the system roots.
-    env.NODE_EXTRA_CA_CERTS = ca.certPath; // Node, and Bun-compiled binaries
+    env.NODE_EXTRA_CA_CERTS = ca.bundlePath; // Node, and Bun-compiled binaries
     env.SSL_CERT_FILE = ca.bundlePath; // OpenSSL: curl, Rust, Go with cgo
     env.CURL_CA_BUNDLE = ca.bundlePath; // libcurl
     env.REQUESTS_CA_BUNDLE = ca.bundlePath; // Python requests / httpx

@@ -170,4 +170,33 @@ describe('Antigravity CloudCode PA inference routing', () => {
     await proxy(req);
     expect(capturedUrl).toBe('https://mock-google-gateway.internal/v1internal:streamGenerateContent?alt=sse');
   });
+
+  it('routes Google requests to googleUpstream even when ANTHROPIC_UPSTREAM is set', async () => {
+    let capturedUrl: string | undefined;
+    let capturedHeaders: Headers | undefined;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      capturedUrl = input.toString();
+      capturedHeaders = init?.headers as Headers;
+      return new Response('data: {}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    const proxy = createProxy({
+      upstream: 'https://mock-anthropic-gateway.internal',
+      openAIUpstream: 'https://mock-openai-gateway.internal',
+      googleUpstream: 'https://mock-google-gateway.internal',
+    });
+    const req = new Request('http://127.0.0.1:47821/google-ai-studio/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'authorization': 'Bearer google-test-token',
+      },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] }),
+    });
+
+    const res = await proxy(req);
+    expect(res.status).toBe(200);
+    expect(capturedUrl).toBe('https://mock-google-gateway.internal/google-ai-studio/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse');
+    expect(capturedHeaders?.get('authorization')).toBe('Bearer google-test-token');
+  });
 });

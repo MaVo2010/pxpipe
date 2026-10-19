@@ -6,9 +6,7 @@ import { build } from 'esbuild';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
+import { resolveTscBin } from './resolve-tsc.mjs';
 
 // Single source of truth for the CLI version: read it here, inline it into the
 // bundle via esbuild `define`. Reading npm_package_version at CLI *runtime* is
@@ -26,10 +24,7 @@ await mkdir(OUT, { recursive: true });
 // with shell:true trips the DEP0190 arg-escaping warning. Resolving the tsc bin
 // and invoking `node <tsc>` sidesteps both — same pattern as the smoke check
 // below, and drops the build's dependency on pnpm being the caller.
-// TS 7 no longer exports './bin/tsc', so resolve it via the bin field of the
-// (still-exported) package.json instead of a direct subpath require.
-const tsPkgPath = require.resolve('typescript/package.json');
-const tscBin = new URL(require('typescript/package.json').bin.tsc, `file://${tsPkgPath}`).pathname;
+const tscBin = resolveTscBin();
 const tsc = spawnSync(process.execPath, [tscBin, '-p', 'tsconfig.json'], {
   stdio: 'inherit',
 });
